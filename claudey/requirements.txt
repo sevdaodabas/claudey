@@ -1,5 +1,5 @@
 Django~=6.0.3
 python-dotenv~=1.2.2
-beautifulsoup>=4.12.3
+beautifulsoup4>=4.12.3
 requests<2.31.0
 psycopg2-binary>=2.9
