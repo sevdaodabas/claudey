@@ -17,6 +17,7 @@ services:
       - POSTGRES_PORT=5432
     depends_on:
       - db
+      - ai_engine
 
   db:
     image: postgres:15-alpine
@@ -28,5 +29,16 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  ai_engine:
+    build : ./claudey/ai_model
+    container_name: claudey_ai
+    volumes: 
+      - "hf_cache:/root/.cache/huggingface"
+    ports:
+      - "5001:5000"
+    env_file:
+      - .env  
+
 volumes:
   postgres_data:
+  hf_cache:
