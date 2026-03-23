@@ -1,9 +1,16 @@
 import requests, json
+from django.db.models import Q
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from .models import ChatMessage
 from scraper.models import UniversityData
 from django.shortcuts import render
+
+STOP_WORDS = {
+    'bir', 'bu', 've', 'ile', 'de', 'da', 'mi', 'mu', 'ne', 'ben', 'sen',
+    'the', 'is', 'are', 'what', 'how', 'can', 'about', 'hakkında', 'nedir',
+    'nasıl', 'için', 'var', 'mı', 'kadar', 'daha', 'çok', 'bilgi', 'ver',
+}
 
 @csrf_exempt
 def chat_api(request):
@@ -11,14 +18,21 @@ def chat_api(request):
         data = json.loads(request.body)
         user_msg = data.get('message')
 
-        context_obj = UniversityData.objects.filter(content__icontains=user_msg).first()
-        context_text = context_obj.content if context_obj else ""
+        keywords = [w for w in user_msg.split() if w.lower() not in STOP_WORDS and len(w) > 2]
+
+        query = Q()
+        for keyword in keywords:
+            query |= Q(content__icontains=keyword)
+
+        context_entries = UniversityData.objects.filter(query)[:3] if keywords else []
+        context_text = "\n\n".join([f"{entry.title}: {entry.content[:2000]}" for entry in context_entries])
 
         prompt = (
-            "You are a helpful university assistant. "
-            "Answer the question based on the provided context. "
-            "If the context is empty, answer based on your general knowledge.\n\n"
-            f"Context: {context_text}\n"
+            "You are Claudey, the AI assistant of Acibadem University. "
+            "Answer questions using ONLY the provided context below. "
+            "Always respond in the same language the user writes in. "
+            "If the context does not contain relevant information, say you don't have that information.\n\n"
+            f"Context:\n{context_text}\n\n"
             f"Question: {user_msg}\n"
             "Answer:"
         )
