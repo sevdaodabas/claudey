@@ -1,7 +1,8 @@
 import requests, json
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from .models import ChatMessage, UniversityData
+from .models import ChatMessage
+from scraper.models import UniversityData
 from django.shortcuts import render
 
 @csrf_exempt
