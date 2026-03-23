@@ -6,15 +6,8 @@ services:
       - "8000:8000"
     volumes:
       - ./claudey:/app
-    environment:
-      - DEBUG=True
-      - SECRET_KEY=6zzj5#owa9ma+#u*xsq8at6o*-85u)og+9^y8rqyjyxk=*a439
-      - ALLOWED_HOSTS=*
-      - POSTGRES_NAME=claudey_db
-      - POSTGRES_USER=claudey_db
-      - POSTGRES_PASSWORD=claudeyy123
-      - POSTGRES_HOST=db
-      - POSTGRES_PORT=5432
+    env_file:
+      - .env
     depends_on:
       - db
       - ai_engine
