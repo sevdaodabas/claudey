@@ -1,3 +1,4 @@
+import re
 import requests
 import json
 
@@ -11,29 +12,75 @@ from .models import ChatMessage
 from scraper.models import UniversityData
 
 OLLAMA_URL = "http://claudey_ai:11434/api/chat"
-MODEL_NAME = "qwen2.5:3b"
+MODEL_NAME = "qwen2.5:7b"
 
 SYSTEM_PROMPT = (
-    "Sen Claudey'sin, Acıbadem Üniversitesi'nin resmi yapay zeka asistanısın.\n"
-    "Görevin üniversite hakkında sorulan soruları doğru ve anlaşılır şekilde yanıtlamaktır.\n\n"
-    "Kurallar:\n"
-    "- Yalnızca sana verilen bağlam bilgisini kullan.\n"
-    "- Her zaman akıcı, doğal ve anlaşılır Türkçe ile yanıt ver.\n"
-    "- Kısa ve öz yanıtlar ver, gereksiz uzatma.\n"
-    "- Bağlamda ilgili bilgi yoksa 'Bu konuda elimde bilgi bulunmuyor.' de.\n"
-    "- Asla bilgi uydurma.\n"
+    "Sen Claudey'sin, Acıbadem Üniversitesi'nin resmi yapay zeka asistanısın.\n\n"
+    "KESİN KURALLAR:\n"
+    "1. YALNIZCA sana verilen bağlam bilgisini kullan. Bağlamda olmayan bilgiyi ASLA uydurma.\n"
+    "2. Her zaman akıcı, doğal Türkçe kullan.\n"
+    "3. Yanıtını kısa ve net tut.\n"
+    "4. Bağlamda bilgi yoksa şunu söyle: 'Bu konuda elimde yeterli bilgi bulunmuyor.'\n"
 )
 
 OLLAMA_OPTIONS = {
-    "temperature": 0.3,
-    "top_p": 0.9,
-    "num_ctx": 2048,
-    "num_predict": 256,
+    "temperature": 0.2,
+    "top_p": 0.85,
+    "num_ctx": 3072,
+    "num_predict": 300,
 }
 
 
+def extract_relevant_paragraphs(content, keywords, max_chars=800):
+    """İçerikten sorguyla en ilgili paragrafları çıkar."""
+    # Satır veya çift newline ile paragraf ayır
+    paragraphs = re.split(r'\n+', content)
+    # Kısa satırları birleştir
+    merged = []
+    buffer = []
+    for line in paragraphs:
+        line = line.strip()
+        if not line:
+            if buffer:
+                merged.append(' '.join(buffer))
+                buffer = []
+            continue
+        buffer.append(line)
+    if buffer:
+        merged.append(' '.join(buffer))
+
+    if not keywords or not merged:
+        return content[:max_chars]
+
+    scored = []
+    for para in merged:
+        if len(para) < 15:
+            continue
+        score = sum(1 for kw in keywords if kw.lower() in para.lower())
+        if score > 0:
+            scored.append((score, para))
+
+    scored.sort(key=lambda x: -x[0])
+
+    if not scored:
+        return content[:max_chars]
+
+    result = []
+    total = 0
+    for _, para in scored:
+        if total + len(para) > max_chars:
+            remaining = max_chars - total
+            if remaining > 80:
+                result.append(para[:remaining])
+            break
+        result.append(para)
+        total += len(para)
+
+    return '\n\n'.join(result)
+
+
 def search_context(user_msg):
-    """PostgreSQL full-text search ile en ilgili içerikleri bul."""
+    """PostgreSQL full-text search + keyword fallback ile en ilgili içerikleri bul."""
     search_query = SearchQuery(user_msg, search_type='plain', config='simple')
 
     vector = (
@@ -41,33 +88,36 @@ def search_context(user_msg):
         SearchVector('content', weight='B', config='simple')
     )
 
-    results = (
+    results = list(
         UniversityData.objects
         .annotate(rank=SearchRank(vector, search_query))
         .filter(rank__gte=0.01)
-        .order_by('-rank')[:3]
+        .order_by('-rank')[:5]
     )
 
     if not results:
-        keywords = [w for w in user_msg.split() if len(w) > 2]
+        keywords = [w for w in user_msg.split() if len(w) > 1]
         if keywords:
             query = Q()
             for kw in keywords[:5]:
                 query |= Q(title__icontains=kw) | Q(content__icontains=kw)
-            results = UniversityData.objects.filter(query)[:3]
+            results = list(UniversityData.objects.filter(query)[:5])
 
     return results
 
 
-def build_context_text(entries):
-    """Bulunan kayıtlardan yapılandırılmış context metni oluştur."""
+def build_context(entries, user_msg):
+    """Bulunan kayıtlardan akıllı context oluştur."""
     if not entries:
         return ""
 
+    stop = {'bir', 'bu', 've', 'ile', 'de', 'da', 'mi', 'mu', 'ne', 'mı', 'var', 'ben', 'sen', 'the', 'is', 'are', 'ver', 'nedir', 'nasıl', 'kaç'}
+    keywords = [w for w in user_msg.split() if w.lower() not in stop and len(w) > 1]
+
     parts = []
-    for entry in entries:
-        content = entry.content[:500]
-        parts.append(f"[{entry.title}]\n{content}")
+    for entry in entries[:3]:
+        relevant_text = extract_relevant_paragraphs(entry.content, keywords, max_chars=600)
+        parts.append(f"[{entry.title}]\n{relevant_text}")
 
     return "\n\n---\n\n".join(parts)
 
@@ -79,7 +129,7 @@ def chat_api(request):
         user_msg = data.get('message')
 
         entries = search_context(user_msg)
-        context_text = build_context_text(entries)
+        context_text = build_context(entries, user_msg)
 
         if context_text:
             user_content = (
@@ -130,9 +180,9 @@ def generate_title(request):
                         {"role": "user", "content": question},
                     ],
                     "stream": False,
-                    "options": {"temperature": 0.5, "num_ctx": 512},
+                    "options": {"temperature": 0.5, "num_ctx": 512, "num_predict": 20},
                 },
-                timeout=30
+                timeout=60
             )
             title = response.json().get('message', {}).get('content', '').strip()
             title = title.strip('"\'').split('\n')[0][:50]
