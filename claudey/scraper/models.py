@@ -1,10 +1,28 @@
 from django.db import models
 
+
 class UniversityData(models.Model):
-    url = models.URLField(unique=True, help_text="URL of the university's page where data was scraped.")
-    title = models.CharField(max_length=255, help_text="Title of the page.")
-    content = models.TextField(help_text="Content of the page.")
-    scraped_at = models.DateTimeField(auto_now_add=True, help_text="Timestamp when the data was scraped.")
+    CATEGORY_CHOICES = [
+        ('program', 'Program'),
+        ('course', 'Course'),
+        ('general', 'General'),
+        ('admission', 'Admission'),
+        ('staff', 'Staff'),
+        ('contact', 'Contact'),
+        ('other', 'Other'),
+    ]
+    SOURCE_CHOICES = [
+        ('main_site', 'Main Site'),
+        ('bologna', 'Bologna'),
+    ]
+
+    url = models.URLField(unique=True)
+    title = models.CharField(max_length=300)
+    content = models.TextField()
+    category = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default='other')
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default='main_site')
+    level = models.CharField(max_length=50, blank=True, default='')
+    scraped_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         verbose_name = "University Data"
