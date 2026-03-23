@@ -1,7 +1,0 @@
-fastapi
-uvicorn
-transformers
-accelerate
-bitsandbytes
-python-dotenv
-torch --index-url https://download.pytorch.org/whl/cpu

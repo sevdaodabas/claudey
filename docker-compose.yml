@@ -30,15 +30,15 @@ services:
       - postgres_data:/var/lib/postgresql/data
 
   ai_engine:
-    build : ./claudey/ai_model
+    image: ollama/ollama
     container_name: claudey_ai
-    volumes: 
-      - "hf_cache:/root/.cache/huggingface"
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./claudey/ai_model:/app
     ports:
-      - "5001:5000"
-    env_file:
-      - .env  
+      - "11434:11434"
+    entrypoint: ["/app/entrypoint.sh"]
 
 volumes:
   postgres_data:
-  hf_cache:
+  ollama_data:
