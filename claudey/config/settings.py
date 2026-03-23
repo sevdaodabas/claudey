@@ -83,13 +83,15 @@ WSGI_APPLICATION = 'config.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'claudey_db',
-        'USER': 'claudey_db',
-        'PASSWORD': 'claudeyy123',
-        'HOST': 'db',
-        'PORT': 5432,
+        'NAME': os.getenv('POSTGRES_NAME', 'claudey_db'),
+        'USER': os.getenv('POSTGRES_USER', 'claudey_db'),
+        'PASSWORD': os.getenv('POSTGRES_PASSWORD', 'claudeyy123'),
+        'HOST': os.getenv('POSTGRES_HOST', 'db'),
+        'PORT': int(os.getenv('POSTGRES_PORT', '5432')),
     }
 }
+
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
 # Password validation
