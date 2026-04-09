@@ -9,3 +9,5 @@ media/
 .DS_Store
 
 .idea/
+
+chroma_db_data/
