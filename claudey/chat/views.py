@@ -2,8 +2,7 @@ import re
 import requests
 import json
 
-from django.contrib.postgres.search import SearchVector, SearchQuery, SearchRank
-from django.db.models import Q
+from .vector_service import get_embedding, collection
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.shortcuts import render
@@ -16,11 +15,11 @@ MODEL_NAME = "qwen2.5:7b"
 
 SYSTEM_PROMPT = (
     "Sen Claudey'sin, Acıbadem Üniversitesi'nin resmi yapay zeka asistanısın.\n\n"
-    "KESİN KURALLAR:\n"
-    "1. YALNIZCA sana verilen bağlam bilgisini kullan. Bağlamda olmayan bilgiyi ASLA uydurma.\n"
-    "2. Her zaman akıcı, doğal Türkçe kullan.\n"
-    "3. Yanıtını kısa ve net tut.\n"
-    "4. Bağlamda bilgi yoksa şunu söyle: 'Bu konuda elimde yeterli bilgi bulunmuyor.'\n"
+    "HAYATİ KURALLAR:\n"
+    "1. SANA VERİLEN BAĞLAM BİLGİSİNDE CEVAP YOKSA, ASLA VE ASLA BİLGİ UYDURMA.\n"
+    "2. Eğer soru bağlamdaki metinlerle alakasızsa veya bağlamda adres/bilgi geçmiyorsa doğrudan şu cümleyi kur: 'Bu konuda elimde yeterli bilgi bulunmuyor.'\n"
+    "3. Sadece ve sadece bağlamdaki bilgileri kullanarak yanıt ver. Genel kültür veya kendi iç bilgilerini kullanma.\n"
+    "4. Her zaman akıcı ve doğal Türkçe kullan."
 )
 
 OLLAMA_OPTIONS = {
@@ -79,31 +78,101 @@ def extract_relevant_paragraphs(content, keywords, max_chars=800):
     return '\n\n'.join(result)
 
 
-def search_context(user_msg):
-    """PostgreSQL full-text search + keyword fallback ile en ilgili içerikleri bul."""
-    search_query = SearchQuery(user_msg, search_type='plain', config='simple')
+def search_keyword(user_msg):
+    """PostgreSQL üzerinde keyword arama yap.
 
-    vector = (
-        SearchVector('title', weight='A', config='simple') +
-        SearchVector('content', weight='B', config='simple')
-    )
+    Önce title'da arama yapar (daha spesifik sayfalar için).
+    Sonra content'te arar ama navigasyon sayfalarını filtreler.
+    """
 
-    results = list(
+    # Stop words ve noktalama temizleme
+    stop_words = {'nasıl', 'nedir', 'mi', 'mu', 'mı', 'var', 'için', 'ile', 've', 'bu', 'bir', 'kim', 'nerede', 'ne', 'hakkında', 'hakkinda'}
+    clean_msg = re.sub(r'[^\w\s]', ' ', user_msg.lower())
+    keywords = [w for w in clean_msg.split() if len(w) > 2 and w not in stop_words]
+
+    if not keywords:
+        return []
+
+    from django.db.models import Q
+
+    title_filter = Q()
+    for kw in keywords:
+        title_filter |= Q(title__icontains=kw)
+
+    title_results = list(
         UniversityData.objects
-        .annotate(rank=SearchRank(vector, search_query))
-        .filter(rank__gte=0.01)
-        .order_by('-rank')[:5]
+        .filter(title_filter)
+        .exclude(title__iexact='acıbadem üniversitesi')
+        .exclude(title__iexact='acibadem universitesi')
+        .order_by('-scraped_at')[:10]
     )
 
-    if not results:
-        keywords = [w for w in user_msg.split() if len(w) > 1]
-        if keywords:
-            query = Q()
-            for kw in keywords[:5]:
-                query |= Q(title__icontains=kw) | Q(content__icontains=kw)
-            results = list(UniversityData.objects.filter(query)[:5])
+    def score_title(entry):
+        title_lower = entry.title.lower()
+        score = sum(2 if kw in title_lower else 0 for kw in keywords)
+        if len(entry.content) > 1000:
+            score += 1
+        return score
 
-    return results
+    title_results.sort(key=score_title, reverse=True)
+
+    if title_results:
+        return title_results[:5]
+    
+    content_filter = Q()
+    for kw in keywords:
+        content_filter |= Q(content__icontains=kw)
+
+    content_results = list(
+        UniversityData.objects
+        .filter(content_filter)
+        .exclude(title__iexact='acıbadem üniversitesi')
+        .exclude(title__iexact='acibadem universitesi')
+        .filter(content__length__gt=500)  
+        .order_by('-scraped_at')[:10]
+    )
+
+    if content_results:
+        return content_results[:5]
+
+    return []
+
+
+def search_context(user_msg):
+    """Hybrid arama: ChromaDB + PostgreSQL keyword arama."""
+
+    pg_results = search_keyword(user_msg)
+    query_vector = get_embedding(user_msg, is_query=True)
+    chroma_results = []
+
+    if query_vector:
+        results = collection.query(
+            query_embeddings=[query_vector],
+            n_results=5,
+            include=['distances', 'metadatas']
+        )
+
+        ids_result = results.get('ids', [])
+        if ids_result and isinstance(ids_result, list) and len(ids_result) > 0:
+            found_ids = ids_result[0] if isinstance(ids_result[0], list) else ids_result
+            chroma_entries = UniversityData.objects.filter(id__in=found_ids)
+            chroma_results = list(chroma_entries)
+ 
+    seen_ids = set()
+    combined_results = []
+
+    for entry in pg_results:
+        if entry.id not in seen_ids:
+            combined_results.append(entry)
+            seen_ids.add(entry.id)
+
+    for entry in chroma_results:
+        if entry.id not in seen_ids:
+            combined_results.append(entry)
+            seen_ids.add(entry.id)
+
+    return combined_results
+    
 
 
 def build_context(entries, user_msg):
@@ -111,13 +180,15 @@ def build_context(entries, user_msg):
     if not entries:
         return ""
 
-    stop = {'bir', 'bu', 've', 'ile', 'de', 'da', 'mi', 'mu', 'ne', 'mı', 'var', 'ben', 'sen', 'the', 'is', 'are', 'ver', 'nedir', 'nasıl', 'kaç'}
-    keywords = [w for w in user_msg.split() if w.lower() not in stop and len(w) > 1]
+    stop = {'bir', 'bu', 've', 'ile', 'de', 'da', 'mi', 'mu', 'ne', 'mı', 'var', 'ben', 'sen', 'the', 'is', 'are', 'ver', 'nedir', 'nasıl', 'kaç', 'kim'}
+    clean_msg = re.sub(r'[^\w\s]', ' ', user_msg.lower())
+    keywords = [w for w in clean_msg.split() if w not in stop and len(w) > 2]
 
     parts = []
     for entry in entries[:3]:
-        relevant_text = extract_relevant_paragraphs(entry.content, keywords, max_chars=600)
-        parts.append(f"[{entry.title}]\n{relevant_text}")
+        relevant_text = extract_relevant_paragraphs(entry.content, keywords, max_chars=800)
+        if relevant_text:
+            parts.append(f"Kaynak: {entry.title}\n{relevant_text}")
 
     return "\n\n---\n\n".join(parts)
 
@@ -128,22 +199,41 @@ def chat_api(request):
         data = json.loads(request.body)
         user_msg = data.get('message')
 
-        entries = search_context(user_msg)
-        context_text = build_context(entries, user_msg)
+        recent_history = list(ChatMessage.objects.order_by('-id')[:4])
+        recent_history.reverse() 
+
+        search_query = user_msg
+        if len(user_msg.split()) < 3 and recent_history:
+            last_user_query = recent_history[-1].user_query
+            search_query = f"{last_user_query} {user_msg}"
+
+        entries = search_context(search_query)
+        context_text = build_context(entries, search_query)
 
         if context_text:
             user_content = (
-                f"Aşağıdaki bilgileri kullanarak soruyu yanıtla:\n\n"
+                f"Aşağıdaki BAĞLAM BİLGİSİ'ni dikkatlice oku. Sadece bu bilgilere dayanarak kullanıcının sorusunu yanıtla. "
+                f"Eğer cevap bu metinlerde yoksa, uydurmak yerine 'Bu konuda elimde yeterli bilgi bulunmuyor' de.\n\n"
+                f"--- BAĞLAM BİLGİSİ ---\n"
                 f"{context_text}\n\n"
-                f"Soru: {user_msg}"
+                f"--- SORU ---\n"
+                f"{user_msg}"
             )
         else:
-            user_content = f"Soru: {user_msg}"
+            user_content = f"Soru: {user_msg}. (Uyarı: Elinde bu soruyla ilgili hiçbir bağlam bilgisi yok. Sadece 'Bu konuda elimde yeterli bilgi bulunmuyor.' şeklinde cevap ver.)"
 
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ]
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        
+        for chat in recent_history:
+            messages.append({"role": "user", "content": chat.user_query})
+            messages.append({"role": "assistant", "content": chat.ai_response})
+
+        messages.append({"role": "user", "content": user_content})
+
+        print("\n" + "="*50)
+        print("💡 RAG BAĞLAM:")
+        print(context_text[:200] + "..." if len(context_text) > 200 else context_text)
+        print("="*50 + "\n")
 
         try:
             response = requests.post(

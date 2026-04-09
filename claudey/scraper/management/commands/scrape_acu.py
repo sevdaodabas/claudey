@@ -7,6 +7,7 @@ import requests
 from bs4 import BeautifulSoup
 from django.core.management.base import BaseCommand
 
+# Modeli projenize göre import ettiğinizi varsayıyorum
 from scraper.models import UniversityData
 
 MAIN_SITE_SEEDS = [
@@ -20,6 +21,16 @@ MAIN_SITE_SEEDS = [
     'https://www.acibadem.edu.tr/arastirma',
     'https://www.acibadem.edu.tr/iletisim',
     'https://www.acibadem.edu.tr/kariyer-merkezi',
+    'https://acibadem.edu.tr/akademik/lisans/muhendislik-ve-doga-bilimleri-fakultesi/bolumler/bilgisayar-muhendisligi/hakkinda',
+    'https://acibadem.edu.tr/akademik/lisans/muhendislik-ve-doga-bilimleri-fakultesi/bolumler/bilgisayar-muhendisligi/akademik-kadro',
+    'https://acibadem.edu.tr/ogrenci/odeme-yontemleri',
+    'https://acibadem.edu.tr/universite',
+    'https://acibadem.edu.tr/universite/hakkinda/universite-yonetimi',
+    'https://acibadem.edu.tr/universite/hakkinda/idari-birimler',
+    'https://acibadem.edu.tr/aday/ogrenci/egitim/lisans/lisans-kontenjan-ve-puan-tablosu',
+    'https://acibadem.edu.tr/aday/ogrenci/iletisim',
+    'https://www.acibadem.edu.tr/kayit/iletisim/ulasim',
+    'https://www.acibadem.edu.tr/akademik/lisans/muhendislik-ve-doga-bilimleri-fakultesi/bolumler/bilgisayar-muhendisligi/bolum-baskaninin-mesaji',
 ]
 
 SKIP_EXTENSIONS = {
@@ -54,9 +65,9 @@ NOISE_PATTERNS = [
 ]
 
 HEADERS = {
-    'User-Agent': 'ACU-AI-Bot/1.0 (Akademik Proje)',
-    'Accept-Language': 'tr-TR,tr;q=0.9',
-    'Accept': 'text/html,application/xhtml+xml',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
 }
 
 
@@ -79,20 +90,29 @@ def extract_title(soup, url):
     return urlparse(url).path.strip('/').split('/')[-1].replace('-', ' ').title()[:300]
 
 
-def extract_main_content(soup):
-    for tag in soup.find_all(['script', 'style', 'nav', 'footer', 'header', 'noscript', 'iframe']):
+def extract_main_content(soup, url):
+    is_contact = 'iletisim' in url.lower() or 'ulasim' in url.lower()
+    
+    tags_to_remove = ['script', 'style', 'noscript', 'iframe']
+    if not is_contact:
+        tags_to_remove.append('footer')
+
+    for tag in soup.find_all(tags_to_remove):
         tag.decompose()
-    for el in soup.find_all(class_=re.compile(
-        r'cookie|popup|modal|overlay|banner|advertisement|sidebar|menu|nav', re.I
-    )):
+
+    noise_classes = r'cookie-banner|popup|modal-dialog|advertisement'
+
+    for el in soup.find_all(class_=re.compile(noise_classes, re.I)):
         el.decompose()
+
     main = (
         soup.find('main') or
         soup.find('article') or
-        soup.find('div', class_=re.compile(r'content|main|body|article', re.I)) or
-        soup.find('div', id=re.compile(r'content|main|body', re.I)) or
+        soup.find('div', class_=re.compile(r'\bcontent\b|\bmain\b', re.I)) or
+        soup.find('div', id=re.compile(r'content|main', re.I)) or
         soup.body
     )
+    
     if not main:
         return ''
     return normalize_text(main.get_text(separator='\n'))
@@ -134,30 +154,43 @@ class Command(BaseCommand):
 
         while queue and saved < max_pages:
             url = queue.popleft()
+            
             if url in visited:
                 continue
             visited.add(url)
+            
             if should_skip_url(url):
                 continue
+                
             parsed = urlparse(url)
             if parsed.netloc not in ('www.acibadem.edu.tr', 'acibadem.edu.tr'):
                 continue
 
             try:
+            
                 response = requests.get(url, timeout=15, headers=HEADERS)
+                
                 if response.status_code != 200:
+                    self.stdout.write(self.style.WARNING(f"  [ATLANDI - HTTP {response.status_code}] {url}"))
                     continue
+                    
                 if 'text/html' not in response.headers.get('Content-Type', ''):
                     continue
 
                 soup = BeautifulSoup(response.text, 'lxml')
                 title = extract_title(soup, url)
-                content = extract_main_content(soup)
+                content = extract_main_content(soup, url)
 
-                if not content or len(content.strip()) < 80:
+                if not content:
+                    self.stdout.write(self.style.WARNING(f"  [ATLANDI - İçerik Bulunamadı] {url}"))
                     continue
+                if len(content.strip()) < 80:
+                    self.stdout.write(self.style.WARNING(f"  [ATLANDI - Çok Kısa (<80 Karakter)] {url} - Bulunan Uzunluk: {len(content.strip())}"))
+                    continue
+                    
                 alpha_chars = sum(1 for c in content if c.isalpha())
                 if alpha_chars < 20:
+                    self.stdout.write(self.style.WARNING(f"  [ATLANDI - Yetersiz Harf (<20 Harf)] {url} - Bulunan Harf: {alpha_chars}"))
                     continue
 
                 category = guess_category(url)
@@ -174,7 +207,7 @@ class Command(BaseCommand):
                 )
 
                 saved += 1
-                status = "NEW" if created else "UPDATED"
+                status = "YENİ" if created else "GÜNCELLENDİ"
                 self.stdout.write(self.style.SUCCESS(f"  [{saved:3d}] [{status}] {title[:70]}"))
 
                 for link in soup.find_all('a', href=True):
@@ -184,11 +217,12 @@ class Command(BaseCommand):
 
                 time.sleep(delay)
 
-            except requests.exceptions.RequestException:
+            except requests.exceptions.RequestException as e:
+                self.stdout.write(self.style.ERROR(f"  [BAĞLANTI HATASI] {url} -- {e}"))
                 continue
             except Exception as e:
-                self.stdout.write(self.style.ERROR(f"  Error: {url} -- {e}"))
+                self.stdout.write(self.style.ERROR(f"  [BEKLENMEYEN HATA] {url} -- {e}"))
 
         self.stdout.write(self.style.SUCCESS(
-            f"\nDone! {saved} pages saved ({len(visited)} URLs visited)"
+            f"\nTamamlandı! {saved} sayfa kaydedildi (Toplam {len(visited)} URL ziyaret edildi)"
         ))

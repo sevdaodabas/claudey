@@ -15,5 +15,10 @@ echo "Pulling Qwen2.5-7B-Instruct model..."
 ollama pull qwen2.5:7b
 echo "Model is ready."
 
+# Pull the embedding model for ChromaDB
+echo "Pulling Nomic Embedding model..."
+ollama pull nomic-embed-text
+echo "Embedding model is ready."
+
 # Keep container running
 wait
