@@ -1,10 +1,12 @@
 import requests
 import chromadb
+from chromadb.config import Settings
 
 OLLAMA_EMBED_URL = "http://claudey_ai:11434/api/embeddings"
 EMBED_MODEL = "nomic-embed-text"
 
-chroma_client = chromadb.PersistentClient(path="./chroma_db_data")
+chroma_client = chromadb.PersistentClient(path="./chroma_db_data",
+                                          settings=Settings(anonymized_telemetry=False))
 collection = chroma_client.get_or_create_collection(name="university_docs")
 
 def get_embedding(text, is_query=False):

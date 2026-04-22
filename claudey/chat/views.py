@@ -11,15 +11,14 @@ from .models import ChatMessage
 from scraper.models import UniversityData
 
 OLLAMA_URL = "http://claudey_ai:11434/api/chat"
-MODEL_NAME = "qwen2.5:3b"
+MODEL_NAME = "qwen2.5:7b"
 
 SYSTEM_PROMPT = (
-    "Sen Claudey'sin, Acıbadem Üniversitesi'nin resmi yapay zeka asistanısın.\n\n"
-    "HAYATİ KURALLAR:\n"
-    "1. SANA VERİLEN BAĞLAM BİLGİSİNDE CEVAP YOKSA, ASLA VE ASLA BİLGİ UYDURMA.\n"
-    "2. Eğer soru bağlamdaki metinlerle alakasızsa veya bağlamda adres/bilgi geçmiyorsa doğrudan şu cümleyi kur: 'Bu konuda elimde yeterli bilgi bulunmuyor.'\n"
-    "3. Sadece ve sadece bağlamdaki bilgileri kullanarak yanıt ver. Genel kültür veya kendi iç bilgilerini kullanma.\n"
-    "4. Her zaman akıcı ve doğal Türkçe kullan."
+    "Sen Acıbadem Üniversitesi asistanı Claudey'sin. Kısa, net ve doğal Türkçe kullan.\n\n"
+    "KURALLAR:\n"
+    "1. SOHBET: Teşekkür veya selamlama mesajlarına çok kısa, doğal bir karşılık ver (Örn: 'Rica ederim', 'Sizi dinliyorum.'). Sohbetin başında kendini zaten tanıttın, bu yüzden kendini tekrar tanıtma veya uzun uzun selam verme.\n"
+    "2. BİLGİ: Üniversite sorularında SADECE verilen BAĞLAM BİLGİSİ'ni kullan.\n"
+    "3. BİLİNMEYEN: Bağlamda cevap yoksa sadece 'Bu konuda elimde yeterli bilgi bulunmuyor.' de."
 )
 
 OLLAMA_OPTIONS = {
@@ -202,25 +201,41 @@ def chat_api(request):
         recent_history = list(ChatMessage.objects.order_by('-id')[:4])
         recent_history.reverse() 
 
+        chat_keywords = ['merhaba', 'selam', 'hey', 'teşekkürler', 'teşekkür ederim', 'nasılsın', 'iyiyim']
+        is_chat_msg = any(kw in user_msg.lower() for kw in chat_keywords)
+
         search_query = user_msg
-        if len(user_msg.split()) < 3 and recent_history:
+
+        if not is_chat_msg and len(user_msg.split()) < 3 and recent_history:
             last_user_query = recent_history[-1].user_query
             search_query = f"{last_user_query} {user_msg}"
 
-        entries = search_context(search_query)
-        context_text = build_context(entries, search_query)
+        if  is_chat_msg:
+            entries = []
+            context_text = ""
+        else:
+            entries = search_context(search_query)
+            context_text = build_context(entries, user_msg)
 
-        if context_text:
+        
+        if is_chat_msg:
             user_content = (
-                f"Aşağıdaki BAĞLAM BİLGİSİ'ni dikkatlice oku. Sadece bu bilgilere dayanarak kullanıcının sorusunu yanıtla. "
-                f"Eğer cevap bu metinlerde yoksa, uydurmak yerine 'Bu konuda elimde yeterli bilgi bulunmuyor' de.\n\n"
-                f"--- BAĞLAM BİLGİSİ ---\n"
-                f"{context_text}\n\n"
-                f"--- SORU ---\n"
-                f"{user_msg}"
+                f"--- KULLANICI MESAJI ---\n{user_msg}\n\n"
+                f"(Sistem Notu: Bu sadece bir nezaket/sohbet mesajı. Kendini tanıtmana gerek yok. "
+                f"Teşekkürse sadece 'Rica ederim', selamsa sadece 'Sizi dinliyorum / Nasıl yardımcı olabilirim?' gibi çok kısa, doğal bir cevap ver.)"
+            )
+        elif context_text:
+            user_content = (
+                f"--- BAĞLAM BİLGİSİ ---\n{context_text}\n\n"
+                f"--- KULLANICI MESAJI ---\n{user_msg}"
             )
         else:
-            user_content = f"Soru: {user_msg}. (Uyarı: Elinde bu soruyla ilgili hiçbir bağlam bilgisi yok. Sadece 'Bu konuda elimde yeterli bilgi bulunmuyor.' şeklinde cevap ver.)"
+            user_content = (
+                f"--- KULLANICI MESAJI ---\n{user_msg}\n\n"
+                f"(Sistem Notu: Bu bir üniversite sorusu ancak veritabanında hiçbir bilgi yok. "
+                f"SADECE 'Bu konuda elimde yeterli bilgi bulunmuyor.' de ve konuyu kapat.)"
+            )
+
 
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         
@@ -246,7 +261,17 @@ def chat_api(request):
                 },
                 timeout=300
             )
-            ai_reply = response.json().get('message', {}).get('content', '').strip()
+
+            response_json = response.json()
+            print("\n" + "="*50)
+            print(f"DEBUG - OLLAMA YANITI: {response_json}")
+            print("="*50 + "\n")
+
+            if "error" in response_json:
+                ai_reply = f"Ollama Hatası: {response_json['error']}"
+            else:
+                ai_reply = response_json.get('message', {}).get('content', '').strip()
+
         except Exception as e:
             print(f"AI Error: {e}")
             ai_reply = "Yapay zeka servisi şu anda kullanılamıyor. Lütfen daha sonra tekrar deneyin."
