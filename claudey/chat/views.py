@@ -11,7 +11,7 @@ from .models import ChatMessage
 from scraper.models import UniversityData
 
 OLLAMA_URL = "http://claudey_ai:11434/api/chat"
-MODEL_NAME = "qwen2.5:7b"
+MODEL_NAME = "qwen2.5:3b"
 
 SYSTEM_PROMPT = (
     "Sen Claudey'sin, Acıbadem Üniversitesi'nin resmi yapay zeka asistanısın.\n\n"
@@ -128,7 +128,7 @@ def search_keyword(user_msg):
         .filter(content_filter)
         .exclude(title__iexact='acıbadem üniversitesi')
         .exclude(title__iexact='acibadem universitesi')
-        .filter(content__length__gt=500)  
+       # .filter(content__length__gt=500)
         .order_by('-scraped_at')[:10]
     )
 
