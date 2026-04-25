@@ -1,13 +1,22 @@
-import re
-import requests
 import json
+import re
 
-from .vector_service import get_embedding, collection
+import requests
+from django.contrib.postgres.search import SearchQuery, SearchRank, SearchVector
 from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
 from django.shortcuts import render
+from django.views.decorators.csrf import csrf_exempt
 
 from .models import ChatMessage
+from .rag_config import (
+    CHAT_KEYWORDS,
+    INTENT_HINTS,
+    INTENT_PRIORITY_FILTERS,
+    INTENT_PROMPT_NOTES,
+    NOISY_URL_HINTS,
+    STOP_WORDS,
+)
+from .vector_service import collection, get_embedding
 from scraper.models import UniversityData
 
 OLLAMA_URL = "http://claudey_ai:11434/api/chat"
@@ -18,34 +27,223 @@ SYSTEM_PROMPT = (
     "KURALLAR:\n"
     "1. SOHBET: Teşekkür veya selamlama mesajlarına çok kısa, doğal bir karşılık ver (Örn: 'Rica ederim', 'Sizi dinliyorum.'). Sohbetin başında kendini zaten tanıttın, bu yüzden kendini tekrar tanıtma veya uzun uzun selam verme.\n"
     "2. BİLGİ: Üniversite sorularında SADECE verilen BAĞLAM BİLGİSİ'ni kullan.\n"
-    "3. BİLİNMEYEN: Bağlamda cevap yoksa sadece 'Bu konuda elimde yeterli bilgi bulunmuyor.' de."
+    "3. ADRES: Kullanıcı yalnız adres veya konum soruyorsa sadece adres ver; telefon, e-posta, ulaşım tarifi veya ek bilgi verme.\n"
+    "4. BİLİNMEYEN: Bağlamda cevap yoksa sadece 'Bu konuda elimde yeterli bilgi bulunmuyor.' de."
 )
 
 OLLAMA_OPTIONS = {
     "temperature": 0.2,
     "top_p": 0.85,
-    "num_ctx": 3072,
-    "num_predict": 300,
+    "num_ctx": 2048,
+    "num_predict": 220,
 }
+
+
+def has_hint(text, intent_name):
+    """Metinde verilen intent'e ait ipuçlarından biri geçiyorsa True döndürür."""
+    return any(hint in text for hint in INTENT_HINTS[intent_name])
+
+
+def extract_keywords(text):
+    """Mesajı sadeleştirip anlamlı arama anahtar kelimelerini çıkarır."""
+    clean_msg = re.sub(r"[^\w\s]", " ", (text or "").lower())
+    return [w for w in clean_msg.split() if len(w) > 2 and w not in STOP_WORDS]
+
+
+def detect_query_intent(user_msg):
+    """Kullanıcı mesajının hangi soru tipine ait olduğunu kaba kurallarla sınıflandırır."""
+    text = (user_msg or "").lower()
+    intent = {
+        "is_location": has_hint(text, "location"),
+        "is_contact": has_hint(text, "contact"),
+        "is_transport": has_hint(text, "transport"),
+        "is_admission": has_hint(text, "admission"),
+        "is_program": has_hint(text, "program"),
+        "is_life": has_hint(text, "life"),
+    }
+    intent["is_contact"] = intent["is_contact"] or intent["is_location"]
+    if intent["is_transport"]:
+        intent["is_location"] = False
+        intent["is_contact"] = True
+    if intent["is_life"]:
+        intent["is_location"] = False
+        intent["is_contact"] = has_hint(text, "contact")
+    return intent
+
+
+def keyword_relevance_score(entry, keywords):
+    """Anahtar kelimelerin başlık, URL ve içerikte geçmesine göre temel bir skor üretir."""
+    title_lower = entry.title.lower()
+    url_lower = entry.url.lower()
+    content_lower = entry.content.lower()
+    score = 0.0
+
+    for kw in keywords:
+        if kw in title_lower:
+            score += 1.5
+        if kw in url_lower:
+            score += 1.2
+        if kw in content_lower:
+            score += 0.35
+
+    return score
+
+
+def score_entry_for_intent(entry, intent):
+    """Kaydın mevcut kullanıcı niyetine ne kadar uygun olduğunu ek kurallarla puanlar."""
+    title_lower = entry.title.lower()
+    url_lower = entry.url.lower()
+    content_lower = entry.content.lower()
+    score = 0.0
+
+    if any(hint in url_lower for hint in NOISY_URL_HINTS):
+        score -= 0.6
+
+    if entry.category == "contact":
+        score += 0.2
+
+    if intent["is_location"] or intent["is_contact"]:
+        if "ulasim" in url_lower or "ulaşım" in title_lower:
+            score += 1.5
+        if "iletisim" in url_lower or "iletişim" in title_lower:
+            score += 1.0
+        if "kayışdağı" in content_lower or "kayisdagi" in content_lower:
+            score += 2.0
+        if "ataşehir" in content_lower or "atasehir" in content_lower:
+            score += 2.0
+        if "istanbul" in content_lower:
+            score += 1.0
+        if "0216" in content_lower:
+            score += 0.5
+
+    if intent["is_transport"]:
+        if "ulasim" in url_lower or "ulaşım" in title_lower:
+            score += 2.4
+        if any(token in content_lower for token in ("metroyla", "otobüsle", "otobusle", "metro hattı", "metro hatti", "durağı", "duragi")):
+            score += 2.0
+        if any(token in content_lower for token in ("küçükbakkalköy", "kucukbakkalkoy", "kozyatağı", "kozyatagi", "kadıköy", "kadikoy", "üsküdar", "uskudar")):
+            score += 1.5
+
+    if intent["is_admission"]:
+        if entry.category == "admission":
+            score += 1.6
+        if any(token in url_lower for token in ("aday", "kayit", "ucret", "burs", "puan", "kontenjan", "basvuru")):
+            score += 1.0
+        if any(token in title_lower for token in ("ücret", "ucret", "burs", "başvuru", "basvuru", "kayıt", "kayit")):
+            score += 0.8
+
+    if intent["is_program"]:
+        if entry.category in ("program", "course", "staff"):
+            score += 1.5
+        if entry.source == "bologna":
+            score += 1.2
+        if any(token in url_lower for token in ("akademik", "lisans", "onlisans", "lisansustu", "mufredat", "ders", "akademik-kadro")):
+            score += 0.9
+        if any(token in title_lower for token in ("program", "bölüm", "bolum", "fakülte", "fakulte", "müfredat", "mufredat")):
+            score += 0.7
+
+    if intent["is_life"]:
+        if entry.category == "general":
+            score += 1.2
+        if any(token in url_lower for token in ("acuda-yasam", "ogrenci", "kampus", "yurt", "spor", "kutuphane", "erasmus")):
+            score += 1.0
+        if any(token in title_lower for token in ("kampüs", "kampus", "konaklama", "spor", "kulüp", "kulup", "öğrenci", "ogrenci")):
+            score += 0.7
+
+    return score
+
+
+def build_keyword_filter(keywords, include_url=True):
+    """Anahtar kelimeler için title/content ve isteğe bağlı URL tabanlı Django filtresi kurar."""
+    from django.db.models import Q
+
+    keyword_filter = Q()
+    for kw in keywords:
+        condition = Q(title__icontains=kw) | Q(content__icontains=kw)
+        if include_url:
+            condition |= Q(url__icontains=kw)
+        keyword_filter |= condition
+    return keyword_filter
+
+
+def get_priority_queryset(intent, keyword_filter):
+    """Intent'e göre önce bakılacak yüksek öncelikli kayıt kümesini döndürür."""
+    from django.db.models import Q
+
+    if intent["is_location"] or intent["is_contact"]:
+        contact_filter = (
+            Q(category="contact") |
+            Q(title__icontains="iletişim") |
+            Q(title__icontains="iletisim") |
+            Q(title__icontains="ulaşım") |
+            Q(title__icontains="ulasim") |
+            Q(url__icontains="iletisim") |
+            Q(url__icontains="ulasim") |
+            Q(url__icontains="kampus") |
+            Q(url__icontains="kampüs")
+        )
+        return (
+            UniversityData.objects
+            .filter(contact_filter)
+            .exclude(url__icontains="/akademik/")
+            .order_by("-scraped_at")[:INTENT_PRIORITY_FILTERS["contact"]["limit"]]
+        )
+
+    if intent["is_admission"]:
+        return (
+            UniversityData.objects
+            .filter(Q(category="admission") & keyword_filter)
+            .order_by("-scraped_at")[:INTENT_PRIORITY_FILTERS["admission"]["limit"]]
+        )
+
+    if intent["is_program"]:
+        return (
+            UniversityData.objects
+            .filter(Q(category__in=["program", "course", "staff"]) & keyword_filter)
+            .order_by("-scraped_at")[:INTENT_PRIORITY_FILTERS["program"]["limit"]]
+        )
+
+    if intent["is_life"]:
+        return (
+            UniversityData.objects
+            .filter(Q(category__in=["general", "contact"]) & keyword_filter)
+            .order_by("-scraped_at")[:INTENT_PRIORITY_FILTERS["life"]["limit"]]
+        )
+
+    return None
+
+
+def get_intent_priority_results(intent, keywords):
+    """Öncelikli queryset sonucunu skorlayıp en güçlü aday kayıtları seçer."""
+    keyword_filter = build_keyword_filter(keywords)
+    queryset = get_priority_queryset(intent, keyword_filter)
+    if queryset is None:
+        return []
+
+    results = list(queryset)
+    for entry in results:
+        entry.title_hit_count = sum(1 for kw in keywords if kw in entry.title.lower())
+        entry.match_score = score_entry_for_intent(entry, intent) + keyword_relevance_score(entry, keywords)
+
+    results.sort(key=lambda entry: entry.match_score, reverse=True)
+    return [entry for entry in results if getattr(entry, "match_score", 0) > 0][:4]
 
 
 def extract_relevant_paragraphs(content, keywords, max_chars=800):
     """İçerikten sorguyla en ilgili paragrafları çıkar."""
-    # Satır veya çift newline ile paragraf ayır
-    paragraphs = re.split(r'\n+', content)
-    # Kısa satırları birleştir
+    paragraphs = re.split(r"\n+", content)
     merged = []
     buffer = []
     for line in paragraphs:
         line = line.strip()
         if not line:
             if buffer:
-                merged.append(' '.join(buffer))
+                merged.append(" ".join(buffer))
                 buffer = []
             continue
         buffer.append(line)
     if buffer:
-        merged.append(' '.join(buffer))
+        merged.append(" ".join(buffer))
 
     if not keywords or not merged:
         return content[:max_chars]
@@ -58,8 +256,7 @@ def extract_relevant_paragraphs(content, keywords, max_chars=800):
         if score > 0:
             scored.append((score, para))
 
-    scored.sort(key=lambda x: -x[0])
-
+    scored.sort(key=lambda item: -item[0])
     if not scored:
         return content[:max_chars]
 
@@ -74,150 +271,287 @@ def extract_relevant_paragraphs(content, keywords, max_chars=800):
         result.append(para)
         total += len(para)
 
-    return '\n\n'.join(result)
+    return "\n\n".join(result)
+
+
+def extract_location_context(content, max_chars=320):
+    """Adres sorularında sadece konum/adres odaklı satırları bırakır."""
+    if not content:
+        return ""
+
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    location_markers = (
+        "kampüs", "kampus", "cad.", "caddesi", "sokak", "mah.", "mahalle",
+        "no:", "ataşehir", "atasehir", "istanbul", "adres",
+    )
+    blocked_markers = (
+        "telefon", "e-posta", "eposta", "mail", "@", "ulaşım", "ulasim",
+        "metroyla", "otobüsle", "otobusle", "çağrı merkezi", "cagri merkezi",
+    )
+
+    selected = []
+    for line in lines:
+        lower_line = line.lower()
+        if any(marker in lower_line for marker in blocked_markers):
+            continue
+        if any(marker in lower_line for marker in location_markers):
+            selected.append(line)
+
+    if not selected:
+        return ""
+
+    result = " ".join(selected)
+    return result[:max_chars].strip()
+
+
+def extract_transport_context(content, max_chars=650):
+    """Ulaşım sorularında sadece yol tarifi odaklı satırları bırakır."""
+    if not content:
+        return ""
+
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    transport_markers = (
+        "ulaşım", "ulasim", "metroyla", "otobüsle", "otobusle", "metro hattı",
+        "metro hatti", "istasyonu", "durağı", "duragi", "yürüyerek", "yuruyerek",
+        "kadıköy", "kadikoy", "üsküdar", "uskudar", "küçükbakkalköy", "kucukbakkalkoy",
+        "kozyatağı", "kozyatagi", "m8", "m4", "19k", "19y", "19v", "19s", "19t", "14a", "11t", "320a",
+    )
+    blocked_markers = (
+        "telefon", "e-posta", "eposta", "mail", "@", "çağrı merkezi", "cagri merkezi",
+        "öğrenci işleri", "ogrenci isleri", "mali işler", "mali isler",
+    )
+
+    selected = []
+    for line in lines:
+        lower_line = line.lower()
+        if any(marker in lower_line for marker in blocked_markers):
+            continue
+        if any(marker in lower_line for marker in transport_markers):
+            selected.append(line)
+
+    if not selected:
+        return ""
+
+    result = " ".join(selected)
+    return result[:max_chars].strip()
+
+
+def get_context_extractor(intent):
+    """Intent'e göre özel bağlam ayıklayıcıyı seçer."""
+    if intent["is_transport"]:
+        return extract_transport_context
+    if intent["is_location"]:
+        return extract_location_context
+    return None
 
 
 def search_keyword(user_msg):
-    """PostgreSQL üzerinde keyword arama yap.
-
-    Önce title'da arama yapar (daha spesifik sayfalar için).
-    Sonra content'te arar ama navigasyon sayfalarını filtreler.
-    """
-
-    # Stop words ve noktalama temizleme
-    stop_words = {'nasıl', 'nedir', 'mi', 'mu', 'mı', 'var', 'için', 'ile', 've', 'bu', 'bir', 'kim', 'nerede', 'ne', 'hakkında', 'hakkinda'}
-    clean_msg = re.sub(r'[^\w\s]', ' ', user_msg.lower())
-    keywords = [w for w in clean_msg.split() if len(w) > 2 and w not in stop_words]
+    """Önce tam metin arama, sonra keyword fallback ile aday kayıtları bulur."""
+    keywords = extract_keywords(user_msg)
+    intent = detect_query_intent(user_msg)
+    priority_results = get_intent_priority_results(intent, keywords)
+    if priority_results:
+        return priority_results
 
     if not keywords:
         return []
 
-    from django.db.models import Q
+    query_text = " ".join(keywords)
+    search_vector = (
+        SearchVector("title", weight="A", config="simple") +
+        SearchVector("content", weight="B", config="simple")
+    )
+    search_query = SearchQuery(query_text, config="simple", search_type="plain")
 
-    title_filter = Q()
-    for kw in keywords:
-        title_filter |= Q(title__icontains=kw)
-
-    title_results = list(
+    candidates = list(
         UniversityData.objects
-        .filter(title_filter)
-        .exclude(title__iexact='acıbadem üniversitesi')
-        .exclude(title__iexact='acibadem universitesi')
-        .order_by('-scraped_at')[:10]
+        .annotate(rank=SearchRank(search_vector, search_query))
+        .filter(rank__gte=0.03)
+        .exclude(title__iexact="acıbadem üniversitesi")
+        .exclude(title__iexact="acibadem universitesi")
+        .order_by("-rank", "-scraped_at")[:8]
     )
 
-    def score_title(entry):
+    for entry in candidates:
         title_lower = entry.title.lower()
-        score = sum(2 if kw in title_lower else 0 for kw in keywords)
-        if len(entry.content) > 1000:
-            score += 1
-        return score
+        entry.title_hit_count = sum(1 for kw in keywords if kw in title_lower)
+        entry.match_score = (
+            float(getattr(entry, "rank", 0)) +
+            (entry.title_hit_count * 0.15) +
+            score_entry_for_intent(entry, intent)
+        )
 
-    title_results.sort(key=score_title, reverse=True)
+    candidates.sort(key=lambda entry: entry.match_score, reverse=True)
+    if candidates:
+        return candidates[:5]
 
-    if title_results:
-        return title_results[:5]
-    
-    content_filter = Q()
-    for kw in keywords:
-        content_filter |= Q(content__icontains=kw)
-
-    content_results = list(
+    keyword_filter = build_keyword_filter(keywords, include_url=False)
+    fallback_results = list(
         UniversityData.objects
-        .filter(content_filter)
-        .exclude(title__iexact='acıbadem üniversitesi')
-        .exclude(title__iexact='acibadem universitesi')
-       # .filter(content__length__gt=500)
-        .order_by('-scraped_at')[:10]
+        .filter(keyword_filter)
+        .exclude(title__iexact="acıbadem üniversitesi")
+        .exclude(title__iexact="acibadem universitesi")
+        .order_by("-scraped_at")[:6]
     )
 
-    if content_results:
-        return content_results[:5]
+    for entry in fallback_results:
+        title_lower = entry.title.lower()
+        entry.title_hit_count = sum(1 for kw in keywords if kw in title_lower)
+        entry.match_score = (entry.title_hit_count * 0.2) + score_entry_for_intent(entry, intent)
 
-    return []
+    fallback_results.sort(key=lambda entry: entry.match_score, reverse=True)
+    return fallback_results[:5]
+
+
+def search_vector_chunks(user_msg, n_results=4):
+    """Vektör aramayı parça düzeyinde yaparak daha doğru bağlam döndürür."""
+    query_vector = get_embedding(user_msg, is_query=True)
+    if not query_vector:
+        return []
+
+    results = collection.query(
+        query_embeddings=[query_vector],
+        n_results=n_results,
+        include=["distances", "metadatas", "documents"],
+    )
+
+    documents = results.get("documents", [[]])
+    metadatas = results.get("metadatas", [[]])
+    distances = results.get("distances", [[]])
+
+    chunks = []
+    for document, metadata, distance in zip(documents[0], metadatas[0], distances[0]):
+        if not document or not metadata:
+            continue
+
+        chunks.append(
+            {
+                "parent_id": metadata.get("parent_id"),
+                "title": metadata.get("title", "Bilinmeyen Kaynak"),
+                "content": document,
+                "distance": distance,
+            }
+        )
+
+    return chunks
 
 
 def search_context(user_msg):
-    """Hybrid arama: ChromaDB + PostgreSQL keyword arama."""
-
+    """Hybrid arama: hızlı keyword arama + gerektiğinde parça bazlı vektör arar."""
     pg_results = search_keyword(user_msg)
-    query_vector = get_embedding(user_msg, is_query=True)
-    chroma_results = []
+    intent = detect_query_intent(user_msg)
+    strong_title_match = bool(
+        pg_results and getattr(pg_results[0], "title_hit_count", 0) >= 2
+    )
+    vector_results = [] if (
+        strong_title_match or
+        intent["is_location"] or
+        intent["is_contact"] or
+        intent["is_transport"] or
+        intent["is_admission"] or
+        intent["is_program"] or
+        intent["is_life"]
+    ) else search_vector_chunks(user_msg)
 
-    if query_vector:
-        results = collection.query(
-            query_embeddings=[query_vector],
-            n_results=5,
-            include=['distances', 'metadatas']
-        )
-
-        ids_result = results.get('ids', [])
-        if ids_result and isinstance(ids_result, list) and len(ids_result) > 0:
-            found_ids = ids_result[0] if isinstance(ids_result[0], list) else ids_result
-            chroma_entries = UniversityData.objects.filter(id__in=found_ids)
-            chroma_results = list(chroma_entries)
- 
-    seen_ids = set()
-    combined_results = []
-
-    for entry in pg_results:
-        if entry.id not in seen_ids:
-            combined_results.append(entry)
-            seen_ids.add(entry.id)
-
-    for entry in chroma_results:
-        if entry.id not in seen_ids:
-            combined_results.append(entry)
-            seen_ids.add(entry.id)
-
-    return combined_results
-    
+    return pg_results, vector_results
 
 
-def build_context(entries, user_msg):
-    """Bulunan kayıtlardan akıllı context oluştur."""
-    if not entries:
+def build_context(keyword_entries, vector_chunks, user_msg):
+    """Bulunan kayıt ve chunk'ları modelin kullanacağı kısa bir bağlam metnine dönüştürür."""
+    if not keyword_entries and not vector_chunks:
         return ""
 
-    stop = {'bir', 'bu', 've', 'ile', 'de', 'da', 'mi', 'mu', 'ne', 'mı', 'var', 'ben', 'sen', 'the', 'is', 'are', 'ver', 'nedir', 'nasıl', 'kaç', 'kim'}
-    clean_msg = re.sub(r'[^\w\s]', ' ', user_msg.lower())
-    keywords = [w for w in clean_msg.split() if w not in stop and len(w) > 2]
+    keywords = extract_keywords(user_msg)
+    intent = detect_query_intent(user_msg)
+    context_extractor = get_context_extractor(intent)
 
     parts = []
-    for entry in entries[:3]:
-        relevant_text = extract_relevant_paragraphs(entry.content, keywords, max_chars=800)
+    seen_keys = set()
+
+    for entry in keyword_entries[:2]:
+        relevant_text = (
+            context_extractor(entry.content)
+            if context_extractor
+            else extract_relevant_paragraphs(entry.content, keywords, max_chars=800)
+        )
         if relevant_text:
             parts.append(f"Kaynak: {entry.title}\n{relevant_text}")
+            seen_keys.add(str(entry.id))
+
+    for chunk in vector_chunks:
+        key = f"{chunk.get('parent_id')}:{chunk.get('content')[:80]}"
+        if key in seen_keys:
+            continue
+
+        distance = chunk.get("distance")
+        if distance is not None and distance > 1.2:
+            continue
+
+        if context_extractor:
+            max_chars = 450 if intent["is_transport"] else 220
+            snippet = context_extractor(chunk.get("content", ""), max_chars=max_chars)
+        else:
+            snippet = extract_relevant_paragraphs(chunk.get("content", ""), keywords, max_chars=500)
+        if not snippet:
+            continue
+
+        parts.append(f"Kaynak: {chunk.get('title')}\n{snippet}")
+        seen_keys.add(key)
+
+        if len(parts) >= 3:
+            break
 
     return "\n\n---\n\n".join(parts)
 
 
+def build_extra_note(intent):
+    """Bazı intent'ler için prompt'a eklenecek ek yönlendirme notunu döndürür."""
+    if intent["is_transport"]:
+        return INTENT_PROMPT_NOTES["transport"]
+    if intent["is_location"]:
+        return INTENT_PROMPT_NOTES["location"]
+    return ""
+
+
 @csrf_exempt
 def chat_api(request):
+    """Kullanıcı mesajını işler, uygun RAG bağlamını kurar ve AI yanıtını JSON olarak döner."""
     if request.method == "POST":
-        data = json.loads(request.body)
-        user_msg = data.get('message')
+        try:
+            data = json.loads(request.body)
+        except json.JSONDecodeError:
+            return JsonResponse({"reply": "Geçersiz istek verisi gönderildi."}, status=400)
 
-        recent_history = list(ChatMessage.objects.order_by('-id')[:4])
-        recent_history.reverse() 
+        user_msg = (data.get("message") or "").strip()
+        if not user_msg:
+            return JsonResponse({"reply": "Lütfen bir mesaj yazın."}, status=400)
 
-        chat_keywords = ['merhaba', 'selam', 'hey', 'teşekkürler', 'teşekkür ederim', 'nasılsın', 'iyiyim']
-        is_chat_msg = any(kw in user_msg.lower() for kw in chat_keywords)
+        recent_history = list(ChatMessage.objects.order_by("-id")[:4])
+        recent_history.reverse()
+
+        is_chat_msg = any(kw in user_msg.lower() for kw in CHAT_KEYWORDS)
 
         search_query = user_msg
-
         if not is_chat_msg and len(user_msg.split()) < 3 and recent_history:
             last_user_query = recent_history[-1].user_query
             search_query = f"{last_user_query} {user_msg}"
 
-        if  is_chat_msg:
-            entries = []
+        intent = detect_query_intent(user_msg)
+
+        if is_chat_msg:
+            keyword_entries = []
+            vector_chunks = []
             context_text = ""
         else:
-            entries = search_context(search_query)
-            context_text = build_context(entries, user_msg)
+            try:
+                keyword_entries, vector_chunks = search_context(search_query)
+                context_text = build_context(keyword_entries, vector_chunks, user_msg)
+            except Exception as e:
+                print(f"RAG Error: {e}")
+                keyword_entries = []
+                vector_chunks = []
+                context_text = ""
 
-        
         if is_chat_msg:
             user_content = (
                 f"--- KULLANICI MESAJI ---\n{user_msg}\n\n"
@@ -225,9 +559,12 @@ def chat_api(request):
                 f"Teşekkürse sadece 'Rica ederim', selamsa sadece 'Sizi dinliyorum / Nasıl yardımcı olabilirim?' gibi çok kısa, doğal bir cevap ver.)"
             )
         elif context_text:
+            extra_note = build_extra_note(intent)
+            note_suffix = f"\n\n(Sistem Notu: {extra_note})" if extra_note else ""
             user_content = (
                 f"--- BAĞLAM BİLGİSİ ---\n{context_text}\n\n"
                 f"--- KULLANICI MESAJI ---\n{user_msg}"
+                f"{note_suffix}"
             )
         else:
             user_content = (
@@ -236,19 +573,16 @@ def chat_api(request):
                 f"SADECE 'Bu konuda elimde yeterli bilgi bulunmuyor.' de ve konuyu kapat.)"
             )
 
-
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        
-        for chat in recent_history:
+        for chat in recent_history[-2:]:
             messages.append({"role": "user", "content": chat.user_query})
             messages.append({"role": "assistant", "content": chat.ai_response})
-
         messages.append({"role": "user", "content": user_content})
 
-        print("\n" + "="*50)
+        print("\n" + "=" * 50)
         print("💡 RAG BAĞLAM:")
         print(context_text[:200] + "..." if len(context_text) > 200 else context_text)
-        print("="*50 + "\n")
+        print("=" * 50 + "\n")
 
         try:
             response = requests.post(
@@ -259,18 +593,18 @@ def chat_api(request):
                     "stream": False,
                     "options": OLLAMA_OPTIONS,
                 },
-                timeout=300
+                timeout=300,
             )
 
             response_json = response.json()
-            print("\n" + "="*50)
+            print("\n" + "=" * 50)
             print(f"DEBUG - OLLAMA YANITI: {response_json}")
-            print("="*50 + "\n")
+            print("=" * 50 + "\n")
 
             if "error" in response_json:
                 ai_reply = f"Ollama Hatası: {response_json['error']}"
             else:
-                ai_reply = response_json.get('message', {}).get('content', '').strip()
+                ai_reply = response_json.get("message", {}).get("content", "").strip()
 
         except Exception as e:
             print(f"AI Error: {e}")
@@ -282,9 +616,10 @@ def chat_api(request):
 
 @csrf_exempt
 def generate_title(request):
+    """Verilen soru için kısa bir sohbet başlığı üretip JSON olarak döner."""
     if request.method == "POST":
         data = json.loads(request.body)
-        question = data.get('question', '')
+        question = data.get("question", "")
         try:
             response = requests.post(
                 OLLAMA_URL,
@@ -297,10 +632,10 @@ def generate_title(request):
                     "stream": False,
                     "options": {"temperature": 0.5, "num_ctx": 512, "num_predict": 20},
                 },
-                timeout=60
+                timeout=60,
             )
-            title = response.json().get('message', {}).get('content', '').strip()
-            title = title.strip('"\'').split('\n')[0][:50]
+            title = response.json().get("message", {}).get("content", "").strip()
+            title = title.strip("\"'").split("\n")[0][:50]
         except Exception:
             title = question[:30]
         return JsonResponse({"title": title})
