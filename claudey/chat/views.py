@@ -39,6 +39,20 @@ OLLAMA_OPTIONS = {
 }
 
 
+def get_or_create_session_key(request):
+    """Misafir sohbetlerini birbirinden ayırmak için oturum anahtarı sağlar."""
+    if not request.session.session_key:
+        request.session.create()
+    return request.session.session_key
+
+
+def get_message_queryset(request):
+    """Hesaplı kullanıcı için sohbet geçmişi döndürür."""
+    if request.user.is_authenticated:
+        return ChatMessage.objects.filter(user=request.user)
+    return ChatMessage.objects.none()
+
+
 def has_hint(text, intent_name):
     """Metinde verilen intent'e ait ipuçlarından biri geçiyorsa True döndürür."""
     return any(hint in text for hint in INTENT_HINTS[intent_name])
@@ -526,7 +540,7 @@ def chat_api(request):
         if not user_msg:
             return JsonResponse({"reply": "Lütfen bir mesaj yazın."}, status=400)
 
-        recent_history = list(ChatMessage.objects.order_by("-id")[:4])
+        recent_history = list(get_message_queryset(request).order_by("-id")[:4])
         recent_history.reverse()
 
         is_chat_msg = any(kw in user_msg.lower() for kw in CHAT_KEYWORDS)
@@ -610,7 +624,12 @@ def chat_api(request):
             print(f"AI Error: {e}")
             ai_reply = "Yapay zeka servisi şu anda kullanılamıyor. Lütfen daha sonra tekrar deneyin."
 
-        ChatMessage.objects.create(user_query=user_msg, ai_response=ai_reply)
+        if request.user.is_authenticated:
+            ChatMessage.objects.create(
+                user=request.user,
+                user_query=user_msg,
+                ai_response=ai_reply,
+            )
         return JsonResponse({"reply": ai_reply})
 
 
@@ -642,4 +661,25 @@ def generate_title(request):
 
 
 def home(request):
-    return render(request, "chat/home.html")
+    stored_messages = []
+    if request.user.is_authenticated:
+        messages = list(get_message_queryset(request).order_by("-timestamp")[:20])
+        messages.reverse()
+        for message in messages:
+            stored_messages.extend([
+                {"text": message.user_query, "sender": "user"},
+                {"text": message.ai_response, "sender": "bot"},
+            ])
+
+    return render(
+        request,
+        "chat/home.html",
+        {
+            "initial_messages": stored_messages,
+            "storage_key": (
+                f"claudey_chats_user_{request.user.id}"
+                if request.user.is_authenticated
+                else "claudey_chats_guest"
+            ),
+        },
+    )
