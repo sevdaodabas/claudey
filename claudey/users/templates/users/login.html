@@ -1,0 +1,26 @@
+{% extends "users/auth_base.html" %}
+
+{% block title %}Giriş Yap - Claudey{% endblock %}
+{% block heading %}Giriş yap{% endblock %}
+
+{% block content %}
+  <form method="post">
+    {% csrf_token %}
+    {{ form.non_field_errors }}
+
+    <label for="{{ form.username.id_for_label }}">Kullanıcı adı</label>
+    {{ form.username.errors }}
+    {{ form.username }}
+
+    <label for="{{ form.password.id_for_label }}">Şifre</label>
+    {{ form.password.errors }}
+    {{ form.password }}
+
+    <button class="primary-btn" type="submit">Giriş yap</button>
+  </form>
+
+  <div class="links">
+    <a href="{% url 'register' %}">Hesap oluştur</a>
+    <a href="{% url 'home' %}">Misafir devam et</a>
+  </div>
+{% endblock %}

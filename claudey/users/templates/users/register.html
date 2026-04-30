@@ -1,0 +1,31 @@
+{% extends "users/auth_base.html" %}
+
+{% block title %}Hesap Oluştur - Claudey{% endblock %}
+{% block heading %}Hesap oluştur{% endblock %}
+
+{% block content %}
+  <form method="post">
+    {% csrf_token %}
+    {{ form.non_field_errors }}
+
+    <label for="{{ form.username.id_for_label }}">Kullanıcı adı</label>
+    {{ form.username.errors }}
+    {{ form.username }}
+    <span class="helptext">Sadece harf, rakam ve @/./+/-/_ kullanabilirsiniz.</span>
+
+    <label for="{{ form.password1.id_for_label }}">Şifre</label>
+    {{ form.password1.errors }}
+    {{ form.password1 }}
+
+    <label for="{{ form.password2.id_for_label }}">Şifre tekrarı</label>
+    {{ form.password2.errors }}
+    {{ form.password2 }}
+
+    <button class="primary-btn" type="submit">Hesap oluştur</button>
+  </form>
+
+  <div class="links">
+    <a href="{% url 'login' %}">Zaten hesabım var</a>
+    <a href="{% url 'home' %}">Misafir devam et</a>
+  </div>
+{% endblock %}

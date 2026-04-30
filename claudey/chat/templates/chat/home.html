@@ -104,10 +104,34 @@
       height: 60px;
       padding: 0 30px;
       display: flex; justify-content: flex-end; align-items: center;
+      gap: 18px;
       border-bottom: 1px solid var(--border-color);
     }
 
     .status-indicator { color: #10b981; font-size: 12px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+
+    .account-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: #94a3b8;
+      font-size: 13px;
+    }
+
+    .account-link,
+    .logout-btn {
+      color: #f8fafc;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 8px 10px;
+      text-decoration: none;
+      cursor: pointer;
+      font-size: 13px;
+    }
+
+    .account-link.primary { background: var(--accent-orange); border-color: var(--accent-orange); }
+    .logout-form { display: inline; }
 
     .chat-area {
       flex: 1;
@@ -200,6 +224,18 @@
   <div class="main">
     <div class="topbar">
       <div class="status-indicator">● Model Hazır</div>
+      <div class="account-actions">
+        {% if user.is_authenticated %}
+          <span>{{ user.username }}</span>
+          <form class="logout-form" action="{% url 'logout' %}" method="post">
+            {% csrf_token %}
+            <button class="logout-btn" type="submit">Çıkış</button>
+          </form>
+        {% else %}
+          <a class="account-link primary" href="{% url 'login' %}">Giriş yap</a>
+          <a class="account-link" href="{% url 'register' %}">Hesap oluştur</a>
+        {% endif %}
+      </div>
     </div>
 
     <div id="chatArea" class="chat-area">
@@ -216,14 +252,31 @@
     </div>
   </div>
 
+  {{ initial_messages|json_script:"initialMessages" }}
+  {{ storage_key|json_script:"storageKey" }}
+  {{ user.is_authenticated|json_script:"isAuthenticated" }}
   <script>
-    let conversations = JSON.parse(localStorage.getItem('claudey_chats') || '[]');
+    const storageKey = JSON.parse(document.getElementById('storageKey').textContent);
+    const initialMessages = JSON.parse(document.getElementById('initialMessages').textContent);
+    const isAuthenticated = JSON.parse(document.getElementById('isAuthenticated').textContent);
+    let conversations = isAuthenticated ? JSON.parse(localStorage.getItem(storageKey) || '[]') : [];
     let currentChatId = null;
     let isSending = false;
 
     // Başlangıç Kontrolü
     if (conversations.length === 0) {
-      createNewChat();
+      if (initialMessages.length > 0) {
+        conversations.push({
+          id: generateId(),
+          title: 'Geçmiş Sohbet',
+          messages: initialMessages
+        });
+        saveConversations();
+        renderSidebar();
+        loadChat(conversations[0].id);
+      } else {
+        createNewChat();
+      }
     } else {
       renderSidebar();
       loadChat(conversations[0].id);
@@ -239,7 +292,11 @@
         title: 'Yeni Sohbet',
         messages: []
       };
-      conversations.unshift(chat);
+      if (isAuthenticated) {
+        conversations.unshift(chat);
+      } else {
+        conversations = [chat];
+      }
       saveConversations();
       renderSidebar();
       loadChat(chat.id);
@@ -273,12 +330,15 @@
     }
 
     function saveConversations() {
-      localStorage.setItem('claudey_chats', JSON.stringify(conversations));
+      if (!isAuthenticated) return;
+      localStorage.setItem(storageKey, JSON.stringify(conversations));
     }
 
     function renderSidebar() {
       const list = document.getElementById('chatList');
       list.innerHTML = '';
+
+      if (!isAuthenticated) return;
 
       conversations.forEach(chat => {
         const item = document.createElement('div');
