@@ -88,7 +88,11 @@
 
     .chat-item:hover { background: #1e293b; color: white; }
     .chat-item.active { background: #1e3a8a; color: white; }
-    .chat-item span { display: flex; align-items: center; gap: 10px; }
+    .chat-item span {
+      display: flex; align-items: center; gap: 10px;
+      min-width: 0; flex: 1;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
     .chat-item span:before { content: "●"; color: var(--accent-orange); font-size: 8px; }
 
     .delete-btn {
@@ -103,12 +107,30 @@
     .topbar {
       height: 60px;
       padding: 0 30px;
-      display: flex; justify-content: flex-end; align-items: center;
+      display: flex; justify-content: space-between; align-items: center;
       gap: 18px;
       border-bottom: 1px solid var(--border-color);
     }
 
+    .current-chat-title {
+      min-width: 0;
+      flex: 1;
+      color: #e2e8f0;
+      font-size: 15px;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
     .status-indicator { color: #10b981; font-size: 12px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      flex-shrink: 0;
+    }
 
     .account-actions {
       display: flex;
@@ -217,24 +239,27 @@
 
     <button class="new-chat-btn" onclick="createNewChat()">+ Yeni Sohbet</button>
 
-    <div class="history-label">Geçmiş</div>
+    <div class="history-label">Sohbetler</div>
     <div class="chat-list" id="chatList"></div>
   </div>
 
   <div class="main">
     <div class="topbar">
-      <div class="status-indicator">● Model Hazır</div>
-      <div class="account-actions">
-        {% if user.is_authenticated %}
-          <span>{{ user.username }}</span>
-          <form class="logout-form" action="{% url 'logout' %}" method="post">
-            {% csrf_token %}
-            <button class="logout-btn" type="submit">Çıkış</button>
-          </form>
-        {% else %}
-          <a class="account-link primary" href="{% url 'login' %}">Giriş yap</a>
-          <a class="account-link" href="{% url 'register' %}">Hesap oluştur</a>
-        {% endif %}
+      <div id="currentChatTitle" class="current-chat-title"></div>
+      <div class="topbar-actions">
+        <div class="status-indicator">● Model Hazır</div>
+        <div class="account-actions">
+          {% if user.is_authenticated %}
+            <span>{{ user.username }}</span>
+            <form class="logout-form" action="{% url 'logout' %}" method="post">
+              {% csrf_token %}
+              <button class="logout-btn" type="submit">Çıkış</button>
+            </form>
+          {% else %}
+            <a class="account-link primary" href="{% url 'login' %}">Giriş yap</a>
+            <a class="account-link" href="{% url 'register' %}">Hesap oluştur</a>
+          {% endif %}
+        </div>
       </div>
     </div>
 
@@ -326,6 +351,7 @@
       chatArea.appendChild(indicator);
 
       renderSidebar();
+      updateCurrentChatTitle(chat.title);
       chatArea.scrollTop = chatArea.scrollHeight;
     }
 
@@ -345,7 +371,8 @@
         item.className = 'chat-item' + (chat.id === currentChatId ? ' active' : '');
 
         const span = document.createElement('span');
-        span.textContent = chat.title.length > 20 ? chat.title.substring(0, 20) + '...' : chat.title;
+        span.textContent = formatSidebarTitle(chat.title);
+        item.title = chat.title;
 
         const del = document.createElement('button');
         del.className = 'delete-btn';
@@ -406,6 +433,10 @@
 
         // İlk mesajda başlık oluştur
         if (chat.messages.length === 2) {
+          chat.title = createFallbackTitle(message);
+          saveConversations();
+          renderSidebar();
+          updateCurrentChatTitle(chat.title);
           generateChatTitle(chat.id, message);
         }
       } catch (error) {
@@ -415,6 +446,29 @@
 
       isSending = false;
       document.getElementById('sendBtn').disabled = false;
+    }
+
+    function createFallbackTitle(question) {
+      const title = question
+        .replace(/\s+/g, ' ')
+        .replace(/\b(kaç|kac|ne|nedir|nelerdir|hangi|var mı|var mi)\b/gi, '')
+        .trim()
+        .replace(/^["'`“”‘’.,!?;:-]+|["'`“”‘’.,!?;:-]+$/g, '');
+      return title ? truncateAtWord(title, 50) : 'Yeni Sohbet';
+    }
+
+    function formatSidebarTitle(title) {
+      return truncateAtWord(title, 28);
+    }
+
+    function truncateAtWord(text, maxLength) {
+      const cleanText = text.replace(/\s+/g, ' ').trim();
+      if (cleanText.length <= maxLength) return cleanText;
+
+      const shortened = cleanText.substring(0, maxLength + 1);
+      const lastSpace = shortened.lastIndexOf(' ');
+      const cutPoint = lastSpace > 12 ? lastSpace : maxLength;
+      return cleanText.substring(0, cutPoint).trim() + '...';
     }
 
     async function generateChatTitle(chatId, question) {
@@ -427,11 +481,19 @@
         const data = await response.json();
         const chat = conversations.find(c => c.id === chatId);
         if (chat && data.title) {
-          chat.title = data.title;
+          chat.title = createFallbackTitle(data.title);
           saveConversations();
           renderSidebar();
+          if (chat.id === currentChatId) updateCurrentChatTitle(chat.title);
         }
       } catch (e) {}
+    }
+
+    function updateCurrentChatTitle(title) {
+      const titleElement = document.getElementById('currentChatTitle');
+      const chatTitle = title === 'Yeni Sohbet' ? '' : (title || '');
+      titleElement.textContent = chatTitle;
+      titleElement.title = chatTitle;
     }
 
     function appendMessage(text, sender, scroll = true) {
