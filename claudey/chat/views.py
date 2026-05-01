@@ -38,6 +38,8 @@ OLLAMA_OPTIONS = {
     "num_predict": 220,
 }
 
+TITLE_MAX_LENGTH = 50
+
 
 def get_or_create_session_key(request):
     """Misafir sohbetlerini birbirinden ayırmak için oturum anahtarı sağlar."""
@@ -633,12 +635,40 @@ def chat_api(request):
         return JsonResponse({"reply": ai_reply})
 
 
+def fallback_title_from_question(question):
+    """AI başlık üretemediğinde ilk sorudan güvenli bir başlık çıkarır."""
+    title = re.sub(r"\s+", " ", question or "").strip()
+    title = title.strip("\"'`“”‘’.,!?;:-")
+    if not title:
+        return "Yeni Sohbet"
+    return title[:TITLE_MAX_LENGTH].strip()
+
+
+def clean_generated_title(title, question):
+    """AI'dan gelen başlığı temizler; geçersizse soru tabanlı başlığa döner."""
+    title = re.sub(r"\s+", " ", title or "").strip()
+    title = title.strip("\"'`“”‘’ ")
+    title = re.sub(r"^(başlık|baslik|title)\s*:\s*", "", title, flags=re.IGNORECASE).strip()
+    title = title.splitlines()[0].strip(" -•\t") if title else ""
+
+    if not title or len(title) < 3:
+        return fallback_title_from_question(question)
+
+    return title[:TITLE_MAX_LENGTH].strip()
+
+
 @csrf_exempt
 def generate_title(request):
     """Verilen soru için kısa bir sohbet başlığı üretip JSON olarak döner."""
     if request.method == "POST":
-        data = json.loads(request.body)
+        try:
+            data = json.loads(request.body)
+        except json.JSONDecodeError:
+            return JsonResponse({"title": "Yeni Sohbet"}, status=400)
+
         question = data.get("question", "")
+        title = fallback_title_from_question(question)
+
         try:
             response = requests.post(
                 OLLAMA_URL,
@@ -653,10 +683,11 @@ def generate_title(request):
                 },
                 timeout=60,
             )
-            title = response.json().get("message", {}).get("content", "").strip()
-            title = title.strip("\"'").split("\n")[0][:50]
+            response.raise_for_status()
+            generated_title = response.json().get("message", {}).get("content", "")
+            title = clean_generated_title(generated_title, question)
         except Exception:
-            title = question[:30]
+            title = fallback_title_from_question(question)
         return JsonResponse({"title": title})
 
 
