@@ -29,9 +29,10 @@ SYSTEM_PROMPT = (
     "1. ÖZ VE TAM: Gereksiz tekrar/dolgu yok. Ama başladığın cümleyi MUTLAKA tamamla; konuyu yarıda bırakma. Liste kullanırsan en fazla 5 madde.\n"
     "2. SOHBET: Teşekkür/selamlamaya tek cümleyle karşılık ver. Kendini tanıtma.\n"
     "3. BİLGİ: Üniversite sorularında SADECE verilen BAĞLAM BİLGİSİ'ni kullan; uydurma.\n"
-    "4. ADRES: Sadece adres soruluyorsa sadece adres ver; telefon/ulaşım ekleme.\n"
-    "5. BİLİNMEYEN: Bağlamda cevap yoksa yalnızca 'Bu konuda elimde yeterli bilgi bulunmuyor.' de.\n"
-    "6. ÜNİVERSİTE ADI: Üniversitenin adı her zaman 'Acıbadem Üniversitesi'dir. Başka üniversite adı (Akdeniz, İstanbul vb.) ASLA kullanma."
+    "4. KALİTE: Bağlamdaki bilgileri birleştirerek cevap ver; bağlamda olmayan ayrıntı, tarih, ücret, kontenjan, hat veya kişi adı uydurma. Markdown başlıkları kullanma; düz metin veya kısa maddelerle yaz.\n"
+    "5. ADRES: Sadece adres soruluyorsa sadece adres ver; telefon/ulaşım ekleme.\n"
+    "6. BİLİNMEYEN: Bağlamda cevap yoksa yalnızca 'Bu konuda elimde yeterli bilgi bulunmuyor.' de.\n"
+    "7. ÜNİVERSİTE ADI: Üniversitenin adı her zaman 'Acıbadem Üniversitesi'dir. Başka üniversite adı (Akdeniz, İstanbul vb.) ASLA kullanma."
 )
 
 OLLAMA_OPTIONS = {
@@ -49,6 +50,10 @@ CHAT_OLLAMA_OPTIONS = {
 }
 
 TITLE_MAX_LENGTH = 50
+VECTOR_DISTANCE_LIMIT = 1.4
+MIN_STRONG_KEYWORD_SCORE = 1.6
+FEE_HINTS = ("ücret", "ucret", "fiyat", "öğrenim ücreti", "ogrenim ucreti")
+SCHOLARSHIP_HINTS = ("burs", "indirim")
 
 
 def get_or_create_session_key(request):
@@ -87,10 +92,14 @@ def detect_query_intent(user_msg):
         "is_program": has_hint(text, "program"),
         "is_life": has_hint(text, "life"),
     }
+    intent["is_fee"] = any(hint in text for hint in FEE_HINTS)
+    intent["is_scholarship"] = any(hint in text for hint in SCHOLARSHIP_HINTS)
     intent["is_contact"] = intent["is_contact"] or intent["is_location"]
     if intent["is_transport"]:
         intent["is_location"] = False
         intent["is_contact"] = True
+    if intent["is_fee"]:
+        intent["is_admission"] = True
     if intent["is_life"]:
         intent["is_location"] = False
         intent["is_contact"] = has_hint(text, "contact")
@@ -153,6 +162,13 @@ def score_entry_for_intent(entry, intent):
     if intent["is_admission"]:
         if entry.category == "admission":
             score += 1.6
+        if intent["is_fee"]:
+            if any(token in title_lower for token in ("öğrenim ücret", "ogrenim ucret", "ücretleri", "ucretleri")):
+                score += 3.0
+            if any(token in url_lower for token in ("ogrenim-ucret", "ucretleri", "ucret")):
+                score += 2.4
+            if "burs" in title_lower and not intent["is_scholarship"]:
+                score -= 2.2
         if any(token in url_lower for token in ("aday", "kayit", "ucret", "burs", "puan", "kontenjan", "basvuru")):
             score += 1.0
         if any(token in title_lower for token in ("ücret", "ucret", "burs", "başvuru", "basvuru", "kayıt", "kayit")):
@@ -216,6 +232,21 @@ def get_priority_queryset(intent, keyword_filter):
         )
 
     if intent["is_admission"]:
+        if intent["is_fee"] and not intent["is_scholarship"]:
+            fee_filter = (
+                Q(title__icontains="ücret") |
+                Q(title__icontains="ucret") |
+                Q(title__icontains="öğrenim") |
+                Q(title__icontains="ogrenim") |
+                Q(url__icontains="ucret") |
+                Q(url__icontains="ogrenim-ucret")
+            )
+            return (
+                UniversityData.objects
+                .filter(fee_filter & keyword_filter)
+                .order_by("-scraped_at")[:INTENT_PRIORITY_FILTERS["admission"]["limit"]]
+            )
+
         return (
             UniversityData.objects
             .filter(Q(category="admission") & keyword_filter)
@@ -289,15 +320,64 @@ def extract_relevant_paragraphs(content, keywords, max_chars=800):
     result = []
     total = 0
     for _, para in scored:
-        if total + len(para) > max_chars:
+        paragraph_text = (
+            extract_keyword_window(para, keywords, max_chars - total)
+            if len(para) > max_chars - total
+            else para
+        )
+        if total + len(paragraph_text) > max_chars:
             remaining = max_chars - total
             if remaining > 80:
-                result.append(para[:remaining])
+                result.append(extract_keyword_window(para, keywords, remaining))
             break
-        result.append(para)
-        total += len(para)
+        result.append(paragraph_text)
+        total += len(paragraph_text)
 
     return "\n\n".join(result)
+
+
+def extract_keyword_window(text, keywords, max_chars):
+    """Uzun tek paragraflarda sayfa başı yerine eşleşen terimlerin çevresini döndürür."""
+    if not text or max_chars <= 0:
+        return ""
+
+    if len(text) <= max_chars:
+        return text
+
+    lower_text = text.lower()
+    candidate_positions = []
+    for keyword in keywords:
+        keyword_lower = keyword.lower()
+        position = lower_text.find(keyword_lower)
+        if position >= 0:
+            candidate_positions.append(position)
+
+    if not candidate_positions:
+        return text[:max_chars].strip()
+
+    best_start = 0
+    best_score = -1
+    for position in candidate_positions:
+        start = max(0, position - (max_chars // 3))
+        end = min(len(text), start + max_chars)
+        start = max(0, end - max_chars)
+        window = lower_text[start:end]
+        score = sum(1 for keyword in keywords if keyword.lower() in window)
+        if score > best_score:
+            best_score = score
+            best_start = start
+
+    snippet = text[best_start:best_start + max_chars].strip()
+    if "|" in snippet and "|" in text[:500]:
+        table_header = text[:min(360, text.find("|") + 260)].strip()
+        if table_header and table_header not in snippet:
+            remaining = max_chars - len(table_header) - 5
+            snippet = f"{table_header}\n...\n{snippet[:remaining].strip()}" if remaining > 80 else snippet
+    if best_start > 0:
+        snippet = "..." + snippet
+    if best_start + max_chars < len(text):
+        snippet += "..."
+    return snippet
 
 
 def extract_location_context(content, max_chars=320):
@@ -462,57 +542,69 @@ def search_vector_chunks(user_msg, n_results=6):
     return chunks
 
 
+def should_use_vector_search(pg_results, intent):
+    """Keyword sonucu zayıfsa semantik aramayı ek bağlam olarak devreye alır."""
+    if intent["is_location"] or intent["is_contact"] or intent["is_transport"]:
+        return False
+
+    if not pg_results:
+        return True
+
+    top_result = pg_results[0]
+    top_score = getattr(top_result, "match_score", 0)
+    strong_title_match = getattr(top_result, "title_hit_count", 0) >= 2
+
+    if strong_title_match and top_score >= MIN_STRONG_KEYWORD_SCORE:
+        return False
+
+    return len(pg_results) < 2 or top_score < MIN_STRONG_KEYWORD_SCORE
+
+
 def search_context(user_msg):
     """Hybrid arama: keyword/intent araması + zayıf eşleşmelerde vektör takviyesi."""
     pg_results = search_keyword(user_msg)
     intent = detect_query_intent(user_msg)
-    top_score = float(getattr(pg_results[0], "match_score", 0)) if pg_results else 0.0
-    top_title_hits = int(getattr(pg_results[0], "title_hit_count", 0)) if pg_results else 0
-
-    strong_intent = (
-        intent["is_location"] or intent["is_contact"] or intent["is_transport"]
-    )
-    strong_keyword_hit = top_title_hits >= 2 or top_score >= 1.8
-
-    if strong_intent and strong_keyword_hit:
-        vector_results = []
-    elif strong_keyword_hit and len(pg_results) >= 3:
-        vector_results = []
-    else:
-        vector_results = search_vector_chunks(user_msg)
+    vector_results = search_vector_chunks(user_msg) if should_use_vector_search(pg_results, intent) else []
 
     return pg_results, vector_results
 
 
-def build_context(keyword_entries, vector_chunks, user_msg):
+def build_context(keyword_entries, vector_chunks, user_msg, context_query=None):
     """Bulunan kayıt ve chunk'ları modelin kullanacağı kısa bir bağlam metnine dönüştürür."""
     if not keyword_entries and not vector_chunks:
         return ""
 
-    keywords = extract_keywords(user_msg)
-    intent = detect_query_intent(user_msg)
+    retrieval_text = context_query or user_msg
+    keywords = extract_keywords(retrieval_text)
+    intent = detect_query_intent(retrieval_text)
     context_extractor = get_context_extractor(intent)
 
     parts = []
     seen_keys = set()
+    seen_parent_ids = set()
 
-    for entry in keyword_entries[:2]:
+    for entry in keyword_entries[:3]:
         relevant_text = (
             context_extractor(entry.content)
             if context_extractor
-            else extract_relevant_paragraphs(entry.content, keywords, max_chars=800)
+            else extract_relevant_paragraphs(entry.content, keywords, max_chars=1200)
         )
         if relevant_text:
-            parts.append(f"Kaynak: {entry.title}\n{relevant_text}")
+            parts.append(f"Kaynak: {entry.title}\nURL: {entry.url}\n{relevant_text}")
             seen_keys.add(str(entry.id))
+            seen_parent_ids.add(str(entry.id))
 
     for chunk in vector_chunks:
+        parent_id = str(chunk.get("parent_id") or "")
+        if parent_id and parent_id in seen_parent_ids:
+            continue
+
         key = f"{chunk.get('parent_id')}:{chunk.get('content')[:80]}"
         if key in seen_keys:
             continue
 
         distance = chunk.get("distance")
-        if distance is not None and distance > 1.4:
+        if distance is not None and distance > VECTOR_DISTANCE_LIMIT:
             continue
 
         if context_extractor:
@@ -525,6 +617,8 @@ def build_context(keyword_entries, vector_chunks, user_msg):
 
         parts.append(f"Kaynak: {chunk.get('title')}\n{snippet}")
         seen_keys.add(key)
+        if parent_id:
+            seen_parent_ids.add(parent_id)
 
         if len(parts) >= 4:
             break
@@ -534,11 +628,32 @@ def build_context(keyword_entries, vector_chunks, user_msg):
 
 def build_extra_note(intent):
     """Bazı intent'ler için prompt'a eklenecek ek yönlendirme notunu döndürür."""
+    if intent["is_fee"]:
+        return INTENT_PROMPT_NOTES["fee"]
     if intent["is_transport"]:
         return INTENT_PROMPT_NOTES["transport"]
     if intent["is_location"]:
         return INTENT_PROMPT_NOTES["location"]
     return ""
+
+
+def get_simple_chat_reply(user_msg):
+    """Selamlama ve teşekkür gibi basit sohbetleri model çağırmadan yanıtla."""
+    text = (user_msg or "").lower()
+
+    if "teşekkür" in text or "tesekkur" in text or "sağ ol" in text or "sag ol" in text:
+        return "Rica ederim."
+
+    if "nasılsın" in text or "nasilsin" in text:
+        return "İyiyim, teşekkür ederim. Size nasıl yardımcı olabilirim?"
+
+    if "merhaba" in text or "selam" in text or text.strip() == "hey":
+        return "Merhaba, nasıl yardımcı olabilirim?"
+
+    if text.strip() in {"iyiyim", "iyi"}:
+        return "Harika. Size nasıl yardımcı olabilirim?"
+
+    return None
 
 
 @csrf_exempt
@@ -561,6 +676,27 @@ def chat_api(request):
 
     is_chat_msg = any(kw in user_msg.lower() for kw in CHAT_KEYWORDS)
 
+    # Selamlama / teşekkür gibi mesajlar için modeli hiç çağırma — sabit cevabı stream et.
+    simple_chat_reply = get_simple_chat_reply(user_msg) if is_chat_msg else None
+    if simple_chat_reply:
+        if request.user.is_authenticated:
+            try:
+                ChatMessage.objects.create(
+                    user=request.user,
+                    user_query=user_msg,
+                    ai_response=simple_chat_reply,
+                )
+            except Exception as e:
+                print(f"DB save error: {e}")
+
+        def quick_reply():
+            yield simple_chat_reply
+
+        response = StreamingHttpResponse(quick_reply(), content_type="text/plain; charset=utf-8")
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
+        return response
+
     search_query = user_msg
     if not is_chat_msg and len(user_msg.split()) < 3 and recent_history:
         search_query = f"{recent_history[-1].user_query} {user_msg}"
@@ -572,7 +708,7 @@ def chat_api(request):
     else:
         try:
             keyword_entries, vector_chunks = search_context(search_query)
-            context_text = build_context(keyword_entries, vector_chunks, user_msg)
+            context_text = build_context(keyword_entries, vector_chunks, user_msg, context_query=search_query)
         except Exception as e:
             print(f"RAG Error: {e}")
             context_text = ""
