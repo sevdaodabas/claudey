@@ -512,7 +512,7 @@
         const data = await response.json();
         const chat = conversations.find(c => c.id === chatId);
         if (chat && data.title) {
-          chat.title = createFallbackTitle(data.title);
+          chat.title = truncateAtWord(data.title, 50);
           saveConversations();
           renderSidebar();
           if (chat.id === currentChatId) updateCurrentChatTitle(chat.title);
