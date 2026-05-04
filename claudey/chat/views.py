@@ -777,6 +777,28 @@ def chat_api(request):
                 stream=True,
                 timeout=300,
             ) as response:
+                # İlk N karakterlik tampon: model yanlışlıkla 'Sevgili...', 'Sayın...' gibi
+                # hitapla başlarsa o satırı atıp gerçek cevaba geçmek için biriktiriyoruz.
+                buffer = ""
+                opening_cleaned = False
+                BAD_OPENINGS = ("sevgili", "sayın", "sayin", "değerli", "degerli")
+
+                def clean_opening(text):
+                    """Hitapla başlayan cevabın ilk satırını/cümlesini atar."""
+                    lower = text.lstrip().lower()
+                    if not any(lower.startswith(o) for o in BAD_OPENINGS):
+                        return text
+                    stripped = text.lstrip()
+                    cut_idx = -1
+                    for sep in ("\n\n", "\n", ", "):
+                        idx = stripped.find(sep)
+                        if idx > 0 and (cut_idx == -1 or idx < cut_idx):
+                            cut_idx = idx + len(sep)
+                    if cut_idx > 0:
+                        rest = stripped[cut_idx:].lstrip()
+                        return rest if rest else text
+                    return text
+
                 for raw_line in response.iter_lines(decode_unicode=True):
                     if not raw_line:
                         continue
@@ -793,10 +815,27 @@ def chat_api(request):
 
                     piece = chunk.get("message", {}).get("content", "")
                     if piece:
-                        collected.append(piece)
-                        yield piece
+                        if not opening_cleaned:
+                            buffer += piece
+                            # 80 karakter veya satır sonu görene kadar bekle.
+                            if len(buffer) < 80 and "\n" not in buffer and "," not in buffer:
+                                if not chunk.get("done"):
+                                    continue
+                            cleaned = clean_opening(buffer)
+                            opening_cleaned = True
+                            collected.append(cleaned)
+                            yield cleaned
+                        else:
+                            collected.append(piece)
+                            yield piece
 
                     if chunk.get("done"):
+                        # Eğer stream çok kısaysa buffer'ı boşalt.
+                        if not opening_cleaned and buffer:
+                            cleaned = clean_opening(buffer)
+                            collected.append(cleaned)
+                            yield cleaned
+                            opening_cleaned = True
                         break
         except Exception as e:
             print(f"AI Error: {e}")
