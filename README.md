@@ -7,6 +7,58 @@ Claudey, Acıbadem Üniversitesi hakkındaki soruları yanıtlayan Türkçe bir 
 > - **Daha kısa, kaliteli cevaplar:** Sıkılaştırılmış sistem yönergeleri (3-4 cümle / en fazla 4 madde) ve daha düşük `num_predict` ile tekrar/dolgu azaltıldı.
 > - **Hızlandırma:** Sohbet (selamlama/teşekkür) ve "bilgim yok" yolları için ayrı, daha küçük bağlamlı (`num_ctx=512`) Ollama profili.
 
+## Hızlı Başlangıç (Build sonrası çalıştırma)
+
+`docker compose build` veya `docker compose up -d --build` zaten çalıştırıldıysa, çalıştırmak için:
+
+```bash
+# 1) Servisleri başlat (web + db + ai_engine)
+docker compose up -d
+
+# 2) Model hazır mı kontrol et — ilk açılışta ~4.7 GB indirme olabilir
+docker logs claudey_ai --tail 5
+#    "Model is ready." görünene kadar bekle
+
+# 3) Veritabanı migration'larını uygula (sadece ilk çalıştırmada veya yeni migration eklendiğinde)
+docker exec acu_chat_app python manage.py migrate
+
+# 4) Admin kullanıcısı oluştur (sadece ilk kez; .env'deki DJANGO_SUPERUSER_* değerlerini kullanır)
+docker exec acu_chat_app python manage.py createsuperuser --noinput
+
+# 5) (İsteğe bağlı) Veritabanı boşsa scraper'ları çalıştır
+docker exec acu_chat_app python manage.py scrape_acu --max-pages 100 --delay 1.0
+docker exec acu_chat_app python manage.py scrape_bologna --delay 1.5
+```
+
+Sonra tarayıcıdan aç:
+
+- Web arayüzü: <http://localhost:8500>
+- Admin paneli: <http://localhost:8500/admin/>
+
+> **Port notu:** Container içinde Django 8000'de çalışır; host tarafında 8500'e maplenmiştir (Windows 11'in 7980-8079 aralığını Hyper-V için rezerv etmesi nedeniyle). Linux/macOS'ta isterseniz `docker-compose.yml` içinde `"8500:8000"` satırını `"8000:8000"` yapabilirsiniz.
+
+### Sık ihtiyaç duyulan komutlar
+
+```bash
+docker compose ps                        # servislerin durumu
+docker compose logs -f web               # Django canlı log
+docker compose stop                      # servisleri durdur (veriyi siler değil)
+docker compose down                      # container'ları kaldır (volume kalır)
+docker compose down -v                   # volume'lar dahil her şeyi sıfırla (DİKKAT: veri silinir)
+docker compose restart web               # Django'yu yeniden başlat
+docker exec -it acu_chat_app python manage.py shell     # Django shell
+```
+
+### Sorun giderme
+
+| Belirti | Çözüm |
+|--------|-------|
+| `bind: An attempt was made to access a socket in a way forbidden...` | Host portu kullanılıyor/rezerve. `docker-compose.yml`'de host portunu değiştirin (örn. `"8600:8000"`). |
+| Cevap gelmiyor / çok yavaş | `docker logs claudey_ai --tail 20` ile model durumunu kontrol et. İlk istekte model RAM'e yükleniyor (~30 sn). `keep_alive=30m` ile sonraki istekler hızlı olur. |
+| `relation "scraper_universitydata" does not exist` | `docker exec acu_chat_app python manage.py migrate` çalıştırılmadı. |
+| Boş yanıt / "Bu konuda elimde yeterli bilgi bulunmuyor" | Veritabanı boş. 5. adımdaki scraper komutlarını çalıştırın. |
+| Tarayıcıda akış görünmüyor (cevap birden geliyor) | Eski JS cache'i. `Ctrl+Shift+R` ile hard reload yapın. |
+
 ## Mimari
 
 ```
