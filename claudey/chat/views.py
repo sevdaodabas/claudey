@@ -429,7 +429,7 @@ def search_keyword(user_msg):
     return fallback_results[:5]
 
 
-def search_vector_chunks(user_msg, n_results=4):
+def search_vector_chunks(user_msg, n_results=6):
     """Vektör aramayı parça düzeyinde yaparak daha doğru bağlam döndürür."""
     query_vector = get_embedding(user_msg, is_query=True)
     if not query_vector:
@@ -463,21 +463,23 @@ def search_vector_chunks(user_msg, n_results=4):
 
 
 def search_context(user_msg):
-    """Hybrid arama: hızlı keyword arama + gerektiğinde parça bazlı vektör arar."""
+    """Hybrid arama: keyword/intent araması + zayıf eşleşmelerde vektör takviyesi."""
     pg_results = search_keyword(user_msg)
     intent = detect_query_intent(user_msg)
-    strong_title_match = bool(
-        pg_results and getattr(pg_results[0], "title_hit_count", 0) >= 2
+    top_score = float(getattr(pg_results[0], "match_score", 0)) if pg_results else 0.0
+    top_title_hits = int(getattr(pg_results[0], "title_hit_count", 0)) if pg_results else 0
+
+    strong_intent = (
+        intent["is_location"] or intent["is_contact"] or intent["is_transport"]
     )
-    vector_results = [] if (
-        strong_title_match or
-        intent["is_location"] or
-        intent["is_contact"] or
-        intent["is_transport"] or
-        intent["is_admission"] or
-        intent["is_program"] or
-        intent["is_life"]
-    ) else search_vector_chunks(user_msg)
+    strong_keyword_hit = top_title_hits >= 2 or top_score >= 1.8
+
+    if strong_intent and strong_keyword_hit:
+        vector_results = []
+    elif strong_keyword_hit and len(pg_results) >= 3:
+        vector_results = []
+    else:
+        vector_results = search_vector_chunks(user_msg)
 
     return pg_results, vector_results
 
@@ -510,7 +512,7 @@ def build_context(keyword_entries, vector_chunks, user_msg):
             continue
 
         distance = chunk.get("distance")
-        if distance is not None and distance > 1.2:
+        if distance is not None and distance > 1.4:
             continue
 
         if context_extractor:
@@ -524,7 +526,7 @@ def build_context(keyword_entries, vector_chunks, user_msg):
         parts.append(f"Kaynak: {chunk.get('title')}\n{snippet}")
         seen_keys.add(key)
 
-        if len(parts) >= 3:
+        if len(parts) >= 4:
             break
 
     return "\n\n---\n\n".join(parts)
