@@ -59,6 +59,10 @@ CHAT_OLLAMA_OPTIONS = {
 
 TITLE_MAX_LENGTH = 50
 
+# Ücret / burs sorularını ayırt etmek için ipuçları.
+FEE_HINTS = ("ücret", "ucret", "fiyat", "öğrenim ücreti", "ogrenim ucreti", "ne kadar")
+SCHOLARSHIP_HINTS = ("burs", "indirim", "destek")
+
 
 def get_or_create_session_key(request):
     """Misafir sohbetlerini birbirinden ayırmak için oturum anahtarı sağlar."""
@@ -96,10 +100,14 @@ def detect_query_intent(user_msg):
         "is_program": has_hint(text, "program"),
         "is_life": has_hint(text, "life"),
     }
+    intent["is_fee"] = any(hint in text for hint in FEE_HINTS)
+    intent["is_scholarship"] = any(hint in text for hint in SCHOLARSHIP_HINTS)
     intent["is_contact"] = intent["is_contact"] or intent["is_location"]
     if intent["is_transport"]:
         intent["is_location"] = False
         intent["is_contact"] = True
+    if intent["is_fee"]:
+        intent["is_admission"] = True
     if intent["is_life"]:
         intent["is_location"] = False
         intent["is_contact"] = has_hint(text, "contact")
@@ -162,6 +170,14 @@ def score_entry_for_intent(entry, intent):
     if intent["is_admission"]:
         if entry.category == "admission":
             score += 1.6
+        if intent["is_fee"]:
+            if any(token in title_lower for token in ("öğrenim ücret", "ogrenim ucret", "ücretleri", "ucretleri")):
+                score += 3.0
+            if any(token in url_lower for token in ("ogrenim-ucret", "ucretleri", "ucret")):
+                score += 2.4
+            # Sırf 'burs' içeren sayfalar ücret sorgusunda asıl ücret tablosunun önüne geçmesin.
+            if "burs" in title_lower and not intent["is_scholarship"]:
+                score -= 2.2
         if any(token in url_lower for token in ("aday", "kayit", "ucret", "burs", "puan", "kontenjan", "basvuru")):
             score += 1.0
         if any(token in title_lower for token in ("ücret", "ucret", "burs", "başvuru", "basvuru", "kayıt", "kayit")):
@@ -225,6 +241,20 @@ def get_priority_queryset(intent, keyword_filter):
         )
 
     if intent["is_admission"]:
+        if intent["is_fee"] and not intent["is_scholarship"]:
+            fee_filter = (
+                Q(title__icontains="ücret") |
+                Q(title__icontains="ucret") |
+                Q(title__icontains="öğrenim") |
+                Q(title__icontains="ogrenim") |
+                Q(url__icontains="ucret") |
+                Q(url__icontains="ogrenim-ucret")
+            )
+            return (
+                UniversityData.objects
+                .filter(fee_filter & keyword_filter)
+                .order_by("-scraped_at")[:INTENT_PRIORITY_FILTERS["admission"]["limit"]]
+            )
         return (
             UniversityData.objects
             .filter(Q(category="admission") & keyword_filter)
