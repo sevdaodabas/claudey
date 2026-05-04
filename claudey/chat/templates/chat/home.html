@@ -62,11 +62,14 @@
       padding: 12px;
       cursor: pointer;
       border-radius: 10px;
-      font-weight: bold;
-      transition: 0.3s;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+      box-shadow: 0 2px 10px rgba(249, 115, 22, 0.25);
+      transition: background 0.2s ease, transform 0.12s ease, box-shadow 0.2s ease;
     }
 
-    .new-chat-btn:hover { opacity: 0.9; transform: scale(0.98); }
+    .new-chat-btn:hover { background: #ea6a0e; box-shadow: 0 4px 14px rgba(249, 115, 22, 0.35); }
+    .new-chat-btn:active { transform: scale(0.98); }
 
     .history-label {
       padding: 0 20px 10px;
@@ -87,7 +90,11 @@
     }
 
     .chat-item:hover { background: #1e293b; color: white; }
-    .chat-item.active { background: #1e3a8a; color: white; }
+    .chat-item.active {
+      background: #1e3a8a;
+      color: white;
+      box-shadow: inset 3px 0 0 var(--accent-orange);
+    }
     .chat-item span {
       display: flex; align-items: center; gap: 10px;
       min-width: 0; flex: 1;
