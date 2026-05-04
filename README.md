@@ -82,9 +82,15 @@ docker exec acu_chat_app python manage.py migrate
 docker exec acu_chat_app python manage.py createsuperuser --noinput
 
 # 7) Veritabanını doldur (scraper'lar)
+#    Tarama bittiğinde otomatik 'reindex_vectors' tetiklenir;
+#    yeni/değişen sayfalar ChromaDB'ye embed edilir.
 docker exec acu_chat_app python manage.py scrape_acu --max-pages 100 --delay 1.0
 docker exec acu_chat_app python manage.py scrape_bologna --delay 1.5
 ```
+
+> **RAG indeksi:** Scraper'lar artık tarama sonunda `reindex_vectors`'ı
+> otomatik çağırır; ayrıca komut çalıştırmanıza gerek yok. İlk kurulumda
+> tüm sayfalar (~250) embed edilir, embedding aşaması ~10 dakika sürer.
 
 Aç:
 - Web: <http://localhost:8500>
@@ -143,6 +149,40 @@ docker exec acu_chat_app python manage.py migrate
 ```bash
 docker exec acu_chat_app python manage.py scrape_acu --max-pages 100 --delay 1.0
 docker exec acu_chat_app python manage.py scrape_bologna --delay 1.5
+```
+
+Her iki komut da bittiğinde **otomatik olarak vektör reindex** yapar; yalnız
+içeriği değişmiş sayfalar embed edilir (delta — content_hash karşılaştırması).
+Sayfalar değişmediyse embedding aşaması saniyeler içinde biter.
+
+İhtiyaç duymadığınız taramada otomatik reindex'i kapatmak için `--no-reindex`:
+
+```bash
+docker exec acu_chat_app python manage.py scrape_acu --no-reindex
+```
+
+### Vektör indeksini elle yönetmek
+
+Scraper çalıştırmadan **yalnız vektör indeksini güncellemek** veya tutarsızlık
+şüphesi varsa sıfırlamak için:
+
+```bash
+# Delta (varsayılan) — sadece değişen / hiç indexlenmemiş kayıtları embed eder.
+docker exec acu_chat_app python manage.py reindex_vectors
+
+# Full — tüm kayıtların content_hash'ini sıfırlayıp baştan embed eder.
+# Embedding modeli veya chunk parametreleri değiştiyse kullanın.
+docker exec acu_chat_app python manage.py reindex_vectors --full
+
+# Prune — PG'de silinmiş kayıtların ChromaDB chunk'larını temizler.
+docker exec acu_chat_app python manage.py reindex_vectors --prune
+
+# Yalnız belli kaynak (test/parça çalışma için).
+docker exec acu_chat_app python manage.py reindex_vectors --source bologna
+docker exec acu_chat_app python manage.py reindex_vectors --limit 10
+
+# Eski 'migrate_chroma' komutu hâlâ çalışır (deprecated alias):
+docker exec acu_chat_app python manage.py migrate_chroma   # = reindex_vectors --full
 ```
 
 ### Servisleri durdurma / kaldırma
@@ -219,6 +259,40 @@ Kullanıcı mesajı geldiğinde `chat_api` şu adımları izler:
 - Sorgu/doküman ayrımı için `search_query: ` / `search_document: ` prefix'leri.
 - `chunk_size=900`, `overlap=180` örtüşmeli parçalama.
 - Embedding çağrıları `lru_cache(maxsize=256)` ile önbelleklenir.
+
+### Vektör indeksinin DB ile senkronizasyonu
+
+`UniversityData` tablosunda `content_hash` alanı (SHA256, title+content)
+bulunur. `vector_service.py` indexing API'si:
+
+| Fonksiyon | Görevi |
+|-----------|--------|
+| `compute_content_hash(title, content)` | Değişim tespiti için deterministik hash |
+| `delete_entry_vectors(entry_id)` | Bir kaydın tüm chunk'larını ChromaDB'den siler |
+| `index_entry(entry, force=False)` | Tek kaydı index'ler; `content_hash` eşleşiyorsa atlar (delta) |
+| `get_indexed_parent_ids()` | ChromaDB'de mevcut parent_id seti |
+| `prune_orphan_vectors(valid_ids)` | PG'de silinmiş kayıtların chunk'larını temizler |
+| `reindex_all(queryset, force, on_progress)` | Toplu reindex; istatistik döner |
+
+**Veri akışı:**
+
+```
+scrape_acu / scrape_bologna
+        │
+        ▼ update_or_create
+PostgreSQL (UniversityData)
+        │
+        ▼ otomatik tetikleme (komut sonu)
+reindex_vectors --source <kaynak>
+        │   ├─ content_hash eşleşiyorsa → atla (saniyeler)
+        │   └─ değişmişse → chunk'la → embed et → upsert
+        ▼
+ChromaDB (university_docs collection)
+```
+
+İçerik hash'i sayesinde scraper'ı sık çalıştırsanız bile yalnız gerçekten
+değişmiş sayfalar embed edilir; geri kalan zaman tamamen retrieval'da
+kullanılır.
 
 ---
 
