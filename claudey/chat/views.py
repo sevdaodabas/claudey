@@ -551,24 +551,36 @@ def search_vector_chunks(user_msg, n_results=6):
     return chunks
 
 
+MIN_STRONG_KEYWORD_SCORE = 1.6
+
+
+def should_use_vector_search(pg_results, intent):
+    """Keyword sonucu yeterince güçlüyse vektör aramasını atlar; aksi halde semantik
+    aramayı ek bağlam olarak devreye alır."""
+    # Konum/iletişim/ulaşım gibi katı intent'lerde keyword ve önceliklendirme zaten
+    # doğru sayfayı buluyor; vektör arama ek değer üretmiyor, hatta gürültü ekliyor.
+    if intent["is_location"] or intent["is_contact"] or intent["is_transport"]:
+        return False
+
+    if not pg_results:
+        return True
+
+    top_result = pg_results[0]
+    top_score = float(getattr(top_result, "match_score", 0))
+    strong_title_match = int(getattr(top_result, "title_hit_count", 0)) >= 2
+
+    if strong_title_match and top_score >= MIN_STRONG_KEYWORD_SCORE:
+        return False
+
+    # Tek bir zayıf sonuç varsa ya da skor düşükse vektör takviyesi al.
+    return len(pg_results) < 2 or top_score < MIN_STRONG_KEYWORD_SCORE
+
+
 def search_context(user_msg):
     """Hybrid arama: keyword/intent araması + zayıf eşleşmelerde vektör takviyesi."""
     pg_results = search_keyword(user_msg)
     intent = detect_query_intent(user_msg)
-    top_score = float(getattr(pg_results[0], "match_score", 0)) if pg_results else 0.0
-    top_title_hits = int(getattr(pg_results[0], "title_hit_count", 0)) if pg_results else 0
-
-    strong_intent = (
-        intent["is_location"] or intent["is_contact"] or intent["is_transport"]
-    )
-    strong_keyword_hit = top_title_hits >= 2 or top_score >= 1.8
-
-    if strong_intent and strong_keyword_hit:
-        vector_results = []
-    elif strong_keyword_hit and len(pg_results) >= 3:
-        vector_results = []
-    else:
-        vector_results = search_vector_chunks(user_msg)
+    vector_results = search_vector_chunks(user_msg) if should_use_vector_search(pg_results, intent) else []
 
     return pg_results, vector_results
 
