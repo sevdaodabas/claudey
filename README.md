@@ -1,304 +1,214 @@
-# Claudey - Acibadem University AI Assistant
+# Claudey — Acıbadem Üniversitesi AI Asistanı
 
-Claudey, Acibadem Universitesi hakkinda sorulara yanit veren yapay zeka destekli bir sohbet uygulamasidir. Universite web sitesinden ve Bologna bilgi sisteminden toplanan verileri kullanarak ogrencilere, aday ogrencilere ve ziyaretcilere anlik bilgi sunar.
+Claudey, Acıbadem Üniversitesi hakkındaki soruları yanıtlayan Türkçe bir RAG (Retrieval-Augmented Generation) sohbet uygulamasıdır. Üniversitenin web sitesi ve Bologna bilgi sisteminden taranmış verileri PostgreSQL + ChromaDB üzerinde tutar; Ollama üzerinde çalışan **Qwen2.5-7B** modeline akış (streaming) modunda cevap ürettirir.
 
-## Teknik Mimari
+> **Yenilikler**
+> - **Streaming yanıtlar:** Cevaplar tamamlanmasını beklemeden token bazlı olarak ekrana yazılır.
+> - **Daha kısa, kaliteli cevaplar:** Sıkılaştırılmış sistem yönergeleri (3-4 cümle / en fazla 4 madde) ve daha düşük `num_predict` ile tekrar/dolgu azaltıldı.
+> - **Hızlandırma:** Sohbet (selamlama/teşekkür) ve "bilgim yok" yolları için ayrı, daha küçük bağlamlı (`num_ctx=512`) Ollama profili.
 
-Proje uc Docker container uzerinde calisir:
+## Mimari
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Docker Compose                       │
-│                                                         │
-│  ┌─────────────┐  ┌──────────────┐  ┌───────────────┐  │
-│  │   Django     │  │  PostgreSQL  │  │    Ollama     │  │
-│  │  (web)       │──│  (db)        │  │  (ai_engine)  │  │
-│  │  port:8000   │  │  port:5432   │  │  port:11434   │  │
-│  │              │  │              │  │               │  │
-│  │  - Chat API  │  │  - Scraper   │  │  - Qwen2.5   │  │
-│  │  - Scraper   │  │    verileri  │  │    7B model   │  │
-│  │  - UI        │  │  - Chat      │  │               │  │
-│  │              │  │    gecmisi   │  │               │  │
-│  └──────┬───────┘  └──────────────┘  └───────┬───────┘  │
-│         │          HTTP /api/chat             │          │
-│         └────────────────────────────────────┘          │
-│                                                         │
-│  Volumes:                                               │
-│    - postgres_data  (veritabani kaliciligi)              │
-│    - ollama_data    (AI model kaliciligi)                │
-└─────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│                       Docker Compose                       │
+│                                                            │
+│  ┌────────────┐   ┌────────────┐   ┌────────────────────┐  │
+│  │  Django    │   │ PostgreSQL │   │ Ollama (claudey_ai)│  │
+│  │  (web)     │──▶│   (db)     │   │  Qwen2.5-7B        │  │
+│  │  :8000     │   │   :5432    │◀──│  :11434            │  │
+│  │            │   │            │   │                    │  │
+│  │ Chat API ──┼───┼─ FTS arama │   │ /api/chat (stream) │  │
+│  │ ChromaDB   │   │ Scraper DB │   │                    │  │
+│  │ Vector RAG │   │ Chat hist. │   │                    │  │
+│  └────────────┘   └────────────┘   └────────────────────┘  │
+│                                                            │
+│  Volumes: postgres_data · ollama_data · chroma_db_data     │
+└────────────────────────────────────────────────────────────┘
 ```
 
 ### Servisler
 
-| Servis | Container | Teknoloji | Gorev |
-|--------|-----------|-----------|-------|
-| **web** | `acu_chat_app` | Django 5.x, Python 3.12 | Web arayuzu, API, scraper komutlari |
-| **db** | `acuchat_db` | PostgreSQL 15 Alpine | Veri depolama, full-text search |
-| **ai_engine** | `claudey_ai` | Ollama + Qwen2.5-7B | Dogal dil isleme, soru yanit |
+| Servis      | Container       | Teknoloji                      | Görevi |
+|-------------|-----------------|--------------------------------|--------|
+| `web`       | `acu_chat_app`  | Django 5.x, Python 3.12        | UI, REST API, RAG, scraper komutları |
+| `db`        | `acuchat_db`    | PostgreSQL 15 Alpine           | Veri + full-text search |
+| `ai_engine` | `claudey_ai`    | Ollama + Qwen2.5-7B-Instruct   | LLM yanıt (streaming) |
 
-### Django Uygulamalari
+### Django uygulamaları
+- **chat** — Sohbet UI'ı, streaming `chat_api`, başlık üretici
+- **scraper** — `UniversityData` modeli ve `scrape_acu`, `scrape_bologna` komutları
+- **users** — Kullanıcı yönetimi (kayıt, giriş, çıkış)
+- **config** — Django ayarları, URL yönlendirmeleri
 
-- **chat** — Sohbet arayuzu ve API endpointleri
-- **scraper** — Web scraping komutlari ve UniversityData modeli
-- **users** — Kullanici yonetimi (gelistirme asamasinda)
-- **config** — Django yapilandirmasi
+### Veri modelleri
 
-### Veritabani Modelleri
-
-**UniversityData** (scraper app):
-| Alan | Tip | Aciklama |
+**UniversityData** (scraper)
+| Alan | Tip | Açıklama |
 |------|-----|----------|
-| url | URLField | Sayfa URL'si (unique) |
-| title | CharField(300) | Sayfa basligi |
-| content | TextField | Temizlenmis sayfa icerigi |
-| category | CharField | program, course, general, admission, staff, contact, other |
-| source | CharField | main_site veya bologna |
-| level | CharField | Lisans, Yuksek Lisans, On Lisans, Doktora |
-| scraped_at | DateTimeField | Taranma zamani |
+| url | URLField (unique) | Kaynak sayfa |
+| title | CharField(300) | Sayfa başlığı |
+| content | TextField | Temizlenmiş içerik |
+| category | CharField | program/course/general/admission/staff/contact/other |
+| source | CharField | `main_site` veya `bologna` |
+| level | CharField | Lisans / Yüksek Lisans / Ön Lisans / Doktora |
+| scraped_at | DateTimeField | Taranma zamanı |
 
-**ChatMessage** (chat app):
-| Alan | Tip | Aciklama |
-|------|-----|----------|
-| user_query | TextField | Kullanicinin sorusu |
-| ai_response | TextField | AI'in yaniti |
-| timestamp | DateTimeField | Mesaj zamani |
+**ChatMessage** (chat) — kullanıcı mesajı + AI yanıtı + zaman damgası (yalnızca kayıtlı kullanıcılar için saklanır).
 
-### AI Entegrasyonu
+## RAG akışı
 
-**Model:** Qwen2.5-7B-Instruct (~4.7 GB)
-- Ollama uzerinde CPU modunda calisir
-- `/api/chat` endpoint'i ile system/user mesaj formati kullanilir
-- Parametreler: `temperature=0.2`, `num_ctx=3072`, `num_predict=300`
+1. Kullanıcı mesajı önce **intent** sınıflandırmasından geçer (konum, iletişim, ulaşım, başvuru, program, üniversite yaşamı).
+2. Intent'e göre yüksek öncelikli **PostgreSQL filtresi** kurulur (örn. ulaşım sorularında `ulasim`/`iletisim` URL'leri).
+3. Tam metin arama (`SearchVector` + `SearchRank`, başlık ağırlığı A, içerik B) ile aday kayıtlar çekilir.
+4. Aday yoksa veya niyet belirsizse **ChromaDB üzerinde vektör arama** (`vector_service.py`) devreye girer.
+5. Her kaynaktan, sorguyla en alakalı paragraflar `extract_relevant_paragraphs` ile süzülür; konum/ulaşım için ayrı dar süzgeçler kullanılır.
+6. Hazırlanan bağlam `--- BAĞLAM BİLGİSİ ---` bloğu olarak prompt'a eklenir, Ollama'ya `stream=True` ile gönderilir.
 
-**Context Arama Stratejisi:**
+### Cevap kalitesi yönergeleri (sistem prompt'u)
+- En fazla 3-4 cümle, listelerde en fazla 4 madde.
+- Selamlama/teşekküre tek cümle ile karşılık ver, kendini tanıtma.
+- Yalnız üniversite bilgilerinde verilen bağlamı kullan; bağlam boşsa "Bu konuda elimde yeterli bilgi bulunmuyor." de.
+- Adres soruluyorsa sadece adres ver; ulaşım/telefon ekleme.
 
-1. Kullanicinin sorusu PostgreSQL full-text search ile `SearchVector` ve `SearchRank` kullanilarak aranir
-2. Baslik eslesmelerine yuksek agirlik (weight A), icerik eslesmellerine dusuk agirlik (weight B) verilir
-3. Sonuclar relevans sirasina gore siralanir, en iyi 3 sonuc secilir
-4. Her sonuctan sorguyla en ilgili paragraflar cikarilir (ilk N karakter yerine akilli paragraf secimi)
-5. Full-text search sonuc vermezse keyword-based fallback aramasi devreye girer
-6. Hazirlanan context, system prompt ile birlikte Ollama'ya gonderilir
+### Ollama profilleri
+| Profil | Kullanım | `num_ctx` | `num_predict` | `temperature` |
+|--------|----------|-----------|---------------|---------------|
+| `OLLAMA_OPTIONS` | Bağlamlı bilgi yanıtları | 2048 | 180 | 0.2 |
+| `CHAT_OLLAMA_OPTIONS` | Selamlama / "bilgim yok" yolu | 512 | 60 | 0.3 |
 
-**Prompt Yapisi:**
+## Streaming uçtan uca
+
+**Backend** — `chat/views.py::chat_api`, `StreamingHttpResponse` döner:
+- Ollama'ya `stream=True` ile bağlanır, dönen NDJSON satırlarını parça parça okur.
+- Her parçanın `message.content` alanı anında yanıtın gövdesine yazılır.
+- Akış bittiğinde (kullanıcı oturum açmışsa) toplam metin `ChatMessage` olarak kaydedilir.
+- `Cache-Control: no-cache` ve `X-Accel-Buffering: no` başlıklarıyla ara katman tampotlamaları kapatılır.
+
+**Frontend** — `home.html::sendMessage`:
+- `fetch('/chat-api/')` çağrısının `response.body.getReader()`'ı ile UTF-8 akışı okunur.
+- İlk parça gelince typing göstergesi kapanır, boş bir bot baloncuğu açılır.
+- Her yeni parça `textContent`'e eklenir, alan otomatik kaydırılır.
+- Bağlantı kesilirse mevcut metin korunur ve `[Bağlantı kesildi]` notu eklenir.
+
+## Scraper
+
+**`scrape_acu`** — Ana site BFS tarayıcısı. Seed URL'lerden başlar, gereksiz sayfaları (PDF, görsel, EN sayfaları, login) eler, içerik temizleme uygular, URL'den kategori tahmini yapar. Varsayılan: 100 sayfa, 1 sn bekleme.
+
+**`scrape_bologna`** — Bologna bilgi sisteminden genel bilgi sayfaları + tüm seviyelerdeki program ve detay sayfalarını toplar.
+
+## API uçları
+
+| Endpoint | Method | Açıklama |
+|----------|--------|----------|
+| `/` | GET | Sohbet arayüzü |
+| `/chat-api/` | POST | **Streaming** sohbet yanıtı (`text/plain; charset=utf-8`) |
+| `/generate-title/` | POST | İlk kullanıcı sorusundan kısa başlık |
+| `/admin/` | GET | Django admin |
+| `/accounts/login/`, `/accounts/register/`, `/accounts/logout/` | — | Auth ekranları |
+
+**`POST /chat-api/`**
+```jsonc
+// Request
+{ "message": "Burs imkanları nelerdir?" }
+
+// Response (text/plain, parça parça)
+"Acıbadem Üniversitesi'nde başarı bursu, " ⇨ "indirim ve sosyal sorumluluk bursları " ⇨ ...
 ```
-System: Sen Claudey'sin, Acibadem Universitesi'nin resmi yapay zeka asistanisin...
-User: Asagidaki bilgileri kullanarak soruyu yanitla:
-      [Kaynak 1 basligi]
-      ilgili paragraflar...
-      ---
-      [Kaynak 2 basligi]
-      ilgili paragraflar...
+İstemci tarafında `ReadableStream` ile okunmalıdır; tüm gövde birleştirildiğinde nihai cevap elde edilir.
 
-      Soru: kullanicinin sorusu
-```
-
-### Scraper Sistemi
-
-Iki ayri Django management komutu:
-
-**`scrape_acu`** — Ana site tarayicisi (BFS algoritmasi):
-- Seed URL'lerden baslar, sayfa icerisindeki linkleri takip eder
-- Gereksiz sayfalari atlar (PDF, resim, Ingilizce sayfalar, login vb.)
-- Icerik temizleme: cookie banner, navigation, footer kaldirilir
-- URL'den otomatik kategori tahmini
-- Varsayilan limit: 100 sayfa, 1 saniye bekleme
-
-**`scrape_bologna`** — Bologna bilgi sistemi tarayicisi:
-- Genel bilgi sayfalari (14 sayfa: yonetim, kampus, spor, konaklama vb.)
-- Program sayfalari: On Lisans, Lisans, Yuksek Lisans, Doktora
-- Her program icin detay sayfasi
-
-### Kullanici Arayuzu
-
-- **Sohbet Alani:** Mesaj gonderme, AI yanitlarini goruntuleme
-- **Yaziyor Gostergesi:** AI yanit olustururken animasyonlu uc nokta
-- **Sohbet Yonetimi:** Yeni sohbet olusturma, sohbetler arasi gecis
-- **Otomatik Baslik:** Ilk soruya dayanarak AI sohbet basligi olusturur
-- **Duzenlenebilir Baslik:** Sidebar'da sohbet ismine cift tiklayarak degistirebilirsiniz
-- **LocalStorage:** Sohbet gecmisi tarayicida saklanir
-
-## Kurulum ve Calistirma
+## Kurulum
 
 ### Gereksinimler
+- Docker + Docker Compose
+- En az 8 GB RAM (LLM için)
+- İlk açılışta ~4.7 GB model indirimi için internet
 
-- [Docker](https://docs.docker.com/get-docker/) ve Docker Compose
-- En az 8 GB RAM (AI modeli icin)
-- Internet baglantisi (ilk model indirmesi icin)
+### Adımlar
 
-### Adim Adim Kurulum
+1. **Repo'yu al**
+   ```bash
+   git clone <repo-url>
+   cd claudey
+   ```
 
-**1. Repoyu klonlayin:**
+2. **`.env`** oluştur (proje kök dizini):
+   ```env
+   DEBUG=True
+   SECRET_KEY=guclu-bir-anahtar
+   ALLOWED_HOSTS=*
+
+   POSTGRES_NAME=claudey_db
+   POSTGRES_USER=claudey_db
+   POSTGRES_PASSWORD=claudeyy123
+   POSTGRES_HOST=db
+   POSTGRES_PORT=5432
+
+   DJANGO_SUPERUSER_USERNAME=admin
+   DJANGO_SUPERUSER_EMAIL=admin@claudey.com
+   DJANGO_SUPERUSER_PASSWORD=claudey2026
+   ```
+
+3. **Container'ları başlat**
+   ```bash
+   docker compose up -d --build
+   docker logs claudey_ai --tail 5   # "Model is ready." görünene dek bekle
+   ```
+
+4. **Migrate + superuser**
+   ```bash
+   docker exec acu_chat_app python manage.py migrate
+   docker exec acu_chat_app python manage.py createsuperuser --noinput
+   ```
+
+5. **Veriyi doldur**
+   ```bash
+   docker exec acu_chat_app python manage.py scrape_acu --max-pages 100 --delay 1.0
+   docker exec acu_chat_app python manage.py scrape_bologna --delay 1.5
+   ```
+
+6. **Aç**
+   - Web: <http://localhost:8000>
+   - Admin: <http://localhost:8000/admin/>
+
+### Faydalı komutlar
 ```bash
-git clone https://github.com/sevdaodabas/claudey.git
-cd claudey
-```
-
-**2. `.env` dosyasi olusturun** (proje kok dizininde):
-```env
-DEBUG=True
-SECRET_KEY=buraya-guclu-bir-anahtar-yazin
-ALLOWED_HOSTS=*
-
-POSTGRES_NAME=claudey_db
-POSTGRES_USER=claudey_db
-POSTGRES_PASSWORD=claudeyy123
-POSTGRES_HOST=db
-POSTGRES_PORT=5432
-
-DJANGO_SUPERUSER_USERNAME=admin
-DJANGO_SUPERUSER_EMAIL=admin@claudey.com
-DJANGO_SUPERUSER_PASSWORD=claudey2026
-```
-
-**3. Docker container'larini baslatin:**
-```bash
-docker compose up -d --build
-```
-> Ilk calistirmada AI modeli (~4.7 GB) indirilir. Internet hiziniza bagli olarak birka dakika surebilir.
-
-**4. Model indirmesinin tamamlanmasini bekleyin:**
-```bash
-docker logs claudey_ai --tail 5
-# "Model is ready." mesajini gorene kadar bekleyin
-```
-
-**5. Veritabani migration'larini calistirin:**
-```bash
-docker exec acu_chat_app python manage.py migrate
-```
-
-**6. Superuser olusturun:**
-```bash
-docker exec acu_chat_app python manage.py createsuperuser --noinput
-```
-
-**7. Scraper'lari calistirarak veritabanini doldurun:**
-```bash
-# Ana site (BFS tarama)
-docker exec acu_chat_app python manage.py scrape_acu --max-pages 100 --delay 1.0
-
-# Bologna bilgi sistemi
-docker exec acu_chat_app python manage.py scrape_bologna --delay 1.5
-```
-
-**8. Uygulamayi acin:**
-- Web arayuzu: [http://localhost:8000](http://localhost:8000)
-- Admin paneli: [http://localhost:8000/admin/](http://localhost:8000/admin/)
-
-### Uygulama Nasil Kullanilir
-
-1. Tarayicinizda `http://localhost:8000` adresine gidin
-2. Sol taraftaki sidebar'da **"+ Yeni Sohbet"** butonuna tiklayin
-3. Alt kisimdaki metin kutusuna sorunuzu yazin ve **Enter** tuslayarak veya **Gonder** butonuna tiklayarak gonderin
-4. AI yanit olustururken "yaziyor" animasyonu gorursunuz
-5. Ilk sorunuzdan sonra sohbet ismi otomatik olarak olusturulur
-6. Sohbet ismine **cift tiklayarak** duzenleyebilirsiniz
-7. Sidebar'dan farkli sohbetler arasinda gecis yapabilirsiniz
-8. Admin paneline `http://localhost:8000/admin/` adresinden erisebilirsiniz
-
-**Ornek sorular:**
-- "Bilgisayar muhendisligi bolumu hakkinda bilgi ver"
-- "Tip fakultesi kac yil suruyor?"
-- "Burs imkanlari nelerdir?"
-- "Kampuse nasil ulasabilirim?"
-- "Erasmus programina nasil basvurabilirim?"
-
-### Yararli Docker Komutlari
-
-```bash
-# Container'lari baslat
-docker compose up -d
-
-# Container'lari durdur
-docker compose down
-
-# Loglari izle
-docker compose logs -f
-
-# Django loglarini gor
-docker logs acu_chat_app --tail 50
-
-# AI model durumunu kontrol et
-docker exec claudey_ai ollama list
-
-# Veritabanindaki kayit sayisini gor
-docker exec acuchat_db psql -U claudey_db -d claudey_db -c "SELECT COUNT(*) FROM scraper_universitydata"
-
-# Django shell
+docker compose logs -f                         # tüm loglar
+docker logs acu_chat_app --tail 50             # Django logları
+docker exec claudey_ai ollama list             # yüklü modeller
+docker exec acuchat_db psql -U claudey_db -d claudey_db \
+  -c "SELECT COUNT(*) FROM scraper_universitydata"
 docker exec -it acu_chat_app python manage.py shell
 ```
 
-## API Endpointleri
-
-| Endpoint | Method | Aciklama |
-|----------|--------|----------|
-| `/` | GET | Ana sayfa (sohbet arayuzu) |
-| `/chat-api/` | POST | Sohbet mesaji gonder, AI yaniti al |
-| `/generate-title/` | POST | Sohbet basligi olustur |
-| `/admin/` | GET | Django admin paneli |
-
-**POST `/chat-api/`**
-```json
-// Request
-{ "message": "Bilgisayar muhendisligi hakkinda bilgi ver" }
-
-// Response
-{ "reply": "Acibadem Universitesi Bilgisayar Muhendisligi Bolumu..." }
-```
-
-**POST `/generate-title/`**
-```json
-// Request
-{ "question": "Burs imkanlari nelerdir?" }
-
-// Response
-{ "title": "Burs Imkanlari" }
-```
-
-## Proje Yapisi
+## Proje yapısı
 
 ```
 claudey/
-├── docker-compose.yml          # Docker servisleri tanimi
-├── .env                        # Ortam degiskenleri (git'e eklenmez)
-├── .gitignore
+├── docker-compose.yml
+├── .env
 ├── README.md
-└── claudey/                    # Django projesi
-    ├── manage.py
-    ├── Dockerfile
-    ├── requirements.txt
-    ├── config/                 # Django ayarlari
-    │   ├── settings.py
-    │   ├── urls.py
-    │   ├── wsgi.py
-    │   └── asgi.py
-    ├── chat/                   # Sohbet uygulamasi
-    │   ├── models.py           # ChatMessage modeli
-    │   ├── views.py            # chat_api, generate_title, home
-    │   ├── urls.py
-    │   ├── templates/
-    │   │   └── chat/
-    │   │       └── home.html   # Sohbet arayuzu
-    │   └── migrations/
-    ├── scraper/                # Web scraping uygulamasi
-    │   ├── models.py           # UniversityData modeli
-    │   ├── management/
-    │   │   └── commands/
-    │   │       ├── scrape_acu.py      # Ana site BFS tarayici
-    │   │       └── scrape_bologna.py  # Bologna sistemi tarayici
-    │   └── migrations/
-    ├── users/                  # Kullanici yonetimi
-    └── ai_model/               # AI motor yapilandirmasi
-        └── entrypoint.sh       # Ollama baslat + model indir
+└── claudey/
+    ├── manage.py · Dockerfile · requirements.txt
+    ├── config/                 # Django ayarları, URL'ler
+    ├── chat/
+    │   ├── views.py            # streaming chat_api, generate_title, home
+    │   ├── rag_config.py       # CHAT_KEYWORDS, INTENT_HINTS, NOISY_URL_HINTS, ...
+    │   ├── vector_service.py   # ChromaDB embedding + arama
+    │   ├── models.py           # ChatMessage
+    │   └── templates/chat/home.html   # Streaming UI
+    ├── scraper/
+    │   ├── models.py           # UniversityData
+    │   └── management/commands/{scrape_acu,scrape_bologna}.py
+    ├── users/                  # Auth
+    ├── chroma_db_data/         # Vector store (volume)
+    └── ai_model/entrypoint.sh  # Ollama başlat + model indir
 ```
 
 ## Teknolojiler
-
 - **Backend:** Django 5.x, Python 3.12
-- **Veritabani:** PostgreSQL 15
-- **AI:** Ollama + Qwen2.5-7B-Instruct
-- **Arama:** PostgreSQL Full-Text Search (SearchVector, SearchRank)
+- **DB:** PostgreSQL 15 (Full-Text Search), ChromaDB (vector store)
+- **LLM:** Ollama + Qwen2.5-7B-Instruct (streaming)
 - **Scraping:** BeautifulSoup4, lxml, Requests
-- **Frontend:** Vanilla HTML/CSS/JavaScript
+- **Frontend:** Vanilla HTML/CSS/JS + `ReadableStream` ile akış
 - **Container:** Docker, Docker Compose
