@@ -177,15 +177,16 @@ docker exec acuchat_db psql -U claudey_db -d claudey_db \
 Kullanıcı mesajı geldiğinde `chat_api` şu adımları izler:
 
 1. **Sohbet kontrolü** — Mesaj `CHAT_KEYWORDS`'te bir selamlama/teşekkür içeriyorsa RAG atlanır, mini profil ile direkt cevap üretilir.
-2. **Niyet (intent) sınıflandırması** — `detect_query_intent` mesajı `is_location / is_contact / is_transport / is_admission / is_program / is_life` etiketlerine kabaca böler.
+2. **Niyet (intent) sınıflandırması** — `detect_query_intent` mesajı `is_location / is_contact / is_transport / is_admission / is_program / is_life / is_fee / is_scholarship` etiketlerine kabaca böler. `is_fee` algılanırsa `is_admission` da otomatik açılır; "burs" başlıklı sayfalar ücret sorgusunda negatif puan alır (öğrenim ücreti yerine burs sayfasının dönmemesi için).
 3. **Öncelikli PostgreSQL filtresi** — Niyete göre yüksek olasılıklı kayıt alt kümesi (ör. ulaşım sorularında `ulasim`/`iletisim` URL'leri).
 4. **Tam metin arama** — `SearchVector` (title:A, content:B) + `SearchRank` ile aday kayıtlar.
-5. **Niyet tabanlı puanlama** — `score_entry_for_intent` URL/title/içerik kalıplarıyla aday sıralamasını rafine eder.
-6. **Vektör takviyesi** — `search_context` mantığı:
-   - Konum/iletişim/ulaşım gibi **katı intent + güçlü keyword eşleşmesi** → vektör atlanır.
-   - Aksi halde ChromaDB'de embedding araması ile **6 chunk** çekilir, mesafe eşiği 1.4 ile filtrelenir.
-7. **Bağlam derleme** — `build_context` aday kaynaklardan en fazla 4 parça toplar; konum/ulaşım için özel dar süzgeçler kullanılır.
-8. **Prompt'a yerleştirme** — `--- BAĞLAM BİLGİSİ ---` bloğu ve gerekiyorsa intent'e özel sistem notuyla birlikte Ollama'ya `stream=True` gönderilir.
+5. **Niyet tabanlı puanlama** — `score_entry_for_intent` URL/title/içerik kalıplarıyla aday sıralamasını rafine eder; ücret intent'inde "öğrenim ücret" başlıklı sayfalar +3.0, sırf "burs" sayfaları -2.2 puan alır.
+6. **Vektör takviyesi** — `should_use_vector_search` helper'ı karar verir:
+   - Konum/iletişim/ulaşım intent'i → vektör atlanır.
+   - Güçlü başlık eşleşmesi (≥2 hit) **ve** `match_score ≥ 1.6` → vektör atlanır.
+   - Aksi halde ChromaDB'de embedding araması ile chunk'lar çekilir, `VECTOR_DISTANCE_LIMIT = 1.4` ile filtrelenir.
+7. **Bağlam derleme** — `build_context(..., context_query=search_query)` ile kaynaklardan en fazla 4 parça toplar; her kaynak için `Kaynak: ... / URL: ...` etiketi yazılır, `seen_parent_ids` ile aynı sayfa tekrarı engellenir. Uzun paragraflar `extract_keyword_window` ile sayfa başı yerine eşleşen terimlerin çevresinden kesilir; tablo başlıkları (`|` içeren ilk satır) korunur.
+8. **Prompt'a yerleştirme** — `--- BAĞLAM BİLGİSİ ---` bloğu ve gerekiyorsa intent'e özel sistem notuyla (ücret/ulaşım/konum) birlikte Ollama'ya `stream=True` gönderilir.
 
 ### Embedding katmanı
 
@@ -203,9 +204,10 @@ Kullanıcı mesajı geldiğinde `chat_api` şu adımları izler:
 1. **Öz ve tam:** Tekrar/dolgu yok; başlanan cümle MUTLAKA tamamlanır. Liste varsa en fazla 5 madde.
 2. **Sohbet:** Teşekkür/selamlamaya tek cümleyle karşılık ver, kendini tanıtma.
 3. **Bilgi:** Üniversite sorularında SADECE verilen bağlamı kullan; uydurma yok.
-4. **Adres:** Yalnız adres soruluyorsa sadece adres ver; telefon/ulaşım ekleme.
-5. **Bilinmeyen:** Bağlam yoksa yalnız `"Bu konuda elimde yeterli bilgi bulunmuyor."` cümlesi.
-6. **Üniversite adı kilidi:** Üniversitenin adı her zaman "Acıbadem Üniversitesi". Başka isim (Akdeniz, İstanbul vb.) yasak.
+4. **Kalite:** Bağlamdaki bilgileri birleştir; bağlamda olmayan tarih/ücret/kontenjan/hat/kişi adı uydurma. Markdown başlığı (`#`, `##`) kullanma; düz metin veya kısa madde.
+5. **Adres:** Yalnız adres soruluyorsa sadece adres ver; telefon/ulaşım ekleme.
+6. **Bilinmeyen:** Bağlam yoksa yalnız `"Bu konuda elimde yeterli bilgi bulunmuyor."` cümlesi.
+7. **Üniversite adı kilidi:** Üniversitenin adı her zaman "Acıbadem Üniversitesi". Başka isim (Akdeniz, İstanbul vb.) yasak.
 
 ### Ollama profilleri
 
@@ -238,6 +240,8 @@ Her iki profil de `keep_alive: "30m"` ile çağrılır; model 30 dk RAM'de tutul
 **Hızlı yol (LLM yok)** — Mesaj `merhaba`, `selam`, `teşekkür`, `hi` gibi nezaket sözcükleriyle ≤ 4 kelime ise:
 - Frontend `isGreetingMessage(text)` ile yakalar, doğrudan **"Genel Sohbet"** atar.
 - Backend `is_greeting_question` aynı kontrolü yapar; başka istemcilerden gelen istekler için de güvende kalınır.
+
+> Aynı şekilde **`chat_api`** içinde `get_simple_chat_reply` selamlama/teşekkür mesajına LLM çağırmadan sabit bir cevabı (örn. *"Merhaba, nasıl yardımcı olabilirim?"*, *"Rica ederim."*) tek-parça stream olarak döndürür. Frontend yine `ReadableStream` ile okur — kırılma yok, ama yanıt anında gelir.
 
 **LLM yolu (`generate_title` view)** — Asıl bilgi sorusu için:
 - Few-shot örneklerle prompt: `4 kelime, Title Case, "Merhaba/Sohbet/Soru/Hakkında" yasak, tırnak yok`.
