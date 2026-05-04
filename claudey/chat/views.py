@@ -21,21 +21,31 @@ from scraper.models import UniversityData
 
 OLLAMA_URL = "http://claudey_ai:11434/api/chat"
 MODEL_NAME = "qwen2.5:7b"
+OLLAMA_KEEP_ALIVE = "30m"
 
 SYSTEM_PROMPT = (
-    "Sen Acıbadem Üniversitesi asistanı Claudey'sin. Kısa, net ve doğal Türkçe kullan.\n\n"
-    "KURALLAR:\n"
-    "1. SOHBET: Teşekkür veya selamlama mesajlarına çok kısa, doğal bir karşılık ver (Örn: 'Rica ederim', 'Sizi dinliyorum.'). Sohbetin başında kendini zaten tanıttın, bu yüzden kendini tekrar tanıtma veya uzun uzun selam verme.\n"
-    "2. BİLGİ: Üniversite sorularında SADECE verilen BAĞLAM BİLGİSİ'ni kullan.\n"
-    "3. ADRES: Kullanıcı yalnız adres veya konum soruyorsa sadece adres ver; telefon, e-posta, ulaşım tarifi veya ek bilgi verme.\n"
-    "4. BİLİNMEYEN: Bağlamda cevap yoksa sadece 'Bu konuda elimde yeterli bilgi bulunmuyor.' de."
+    "Sen Acıbadem Üniversitesi asistanı Claudey'sin. Doğal Türkçe konuş.\n\n"
+    "YANIT KURALLARI:\n"
+    "1. ÖZ VE TAM: Gereksiz tekrar/dolgu yok. Ama başladığın cümleyi MUTLAKA tamamla; konuyu yarıda bırakma. Liste kullanırsan en fazla 5 madde.\n"
+    "2. SOHBET: Teşekkür/selamlamaya tek cümleyle karşılık ver. Kendini tanıtma.\n"
+    "3. BİLGİ: Üniversite sorularında SADECE verilen BAĞLAM BİLGİSİ'ni kullan; uydurma.\n"
+    "4. ADRES: Sadece adres soruluyorsa sadece adres ver; telefon/ulaşım ekleme.\n"
+    "5. BİLİNMEYEN: Bağlamda cevap yoksa yalnızca 'Bu konuda elimde yeterli bilgi bulunmuyor.' de.\n"
+    "6. ÜNİVERSİTE ADI: Üniversitenin adı her zaman 'Acıbadem Üniversitesi'dir. Başka üniversite adı (Akdeniz, İstanbul vb.) ASLA kullanma."
 )
 
 OLLAMA_OPTIONS = {
     "temperature": 0.2,
     "top_p": 0.85,
-    "num_ctx": 2048,
-    "num_predict": 220,
+    "num_ctx": 3072,
+    "num_predict": 700,
+}
+
+CHAT_OLLAMA_OPTIONS = {
+    "temperature": 0.3,
+    "top_p": 0.9,
+    "num_ctx": 512,
+    "num_predict": 80,
 }
 
 TITLE_MAX_LENGTH = 50
@@ -570,6 +580,7 @@ def chat_api(request):
             f"--- KULLANICI MESAJI ---\n{user_msg}\n\n"
             f"(Sistem Notu: Sadece nezaket mesajı. Tek kısa cümleyle karşılık ver, kendini tanıtma.)"
         )
+        options = CHAT_OLLAMA_OPTIONS
     elif context_text:
         extra_note = build_extra_note(intent)
         note_suffix = f"\n\n(Sistem Notu: {extra_note})" if extra_note else ""
@@ -578,11 +589,13 @@ def chat_api(request):
             f"--- KULLANICI MESAJI ---\n{user_msg}"
             f"{note_suffix}"
         )
+        options = OLLAMA_OPTIONS
     else:
         user_content = (
             f"--- KULLANICI MESAJI ---\n{user_msg}\n\n"
             f"(Sistem Notu: Bağlam yok. SADECE 'Bu konuda elimde yeterli bilgi bulunmuyor.' de.)"
         )
+        options = CHAT_OLLAMA_OPTIONS
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     for chat in recent_history[-2:]:
@@ -601,7 +614,8 @@ def chat_api(request):
                     "model": MODEL_NAME,
                     "messages": messages,
                     "stream": True,
-                    "options": OLLAMA_OPTIONS,
+                    "keep_alive": OLLAMA_KEEP_ALIVE,
+                    "options": options,
                 },
                 stream=True,
                 timeout=300,
@@ -695,6 +709,7 @@ def generate_title(request):
                         {"role": "user", "content": question},
                     ],
                     "stream": False,
+                    "keep_alive": OLLAMA_KEEP_ALIVE,
                     "options": {"temperature": 0.5, "num_ctx": 512, "num_predict": 20},
                 },
                 timeout=60,
