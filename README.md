@@ -1,6 +1,6 @@
 # Claudey — Acıbadem Üniversitesi AI Asistanı
 
-Claudey, Acıbadem Üniversitesi hakkındaki soruları yanıtlayan Türkçe bir RAG (Retrieval-Augmented Generation) sohbet uygulamasıdır. Üniversitenin kurumsal sitesi ve Bologna bilgi sisteminden taranmış verileri PostgreSQL (full-text search) + ChromaDB (vektör arama) üzerinde tutar; Ollama üzerinde çalışan **Qwen2.5-7B** modeline akış (streaming) modunda cevap ürettirir.
+Claudey, Acıbadem Üniversitesi hakkındaki soruları yanıtlayan Türkçe bir RAG (Retrieval-Augmented Generation) sohbet uygulamasıdır. Üniversitenin kurumsal sitesi ve Bologna bilgi sisteminden taranmış verileri PostgreSQL (full-text search) + ChromaDB (vektör arama) üzerinde tutar; Ollama üzerinde çalışan **Qwen2.5-3B** modeline akış (streaming) modunda cevap ürettirir.
 
 ## Özellikler
 
@@ -21,7 +21,7 @@ Claudey, Acıbadem Üniversitesi hakkındaki soruları yanıtlayan Türkçe bir 
 │                                                            │
 │  ┌────────────┐   ┌────────────┐   ┌────────────────────┐  │
 │  │  Django    │   │ PostgreSQL │   │ Ollama (claudey_ai)│  │
-│  │  (web)     │──▶│   (db)     │   │  Qwen2.5-7B        │  │
+│  │  (web)     │──▶│   (db)     │   │  Qwen2.5-3B        │  │
 │  │  :8000     │   │   :5432    │◀──│  :11434            │  │
 │  │            │   │            │   │                    │  │
 │  │ Chat API ──┼───┼─ FTS arama │   │ /api/chat (stream) │  │
@@ -39,7 +39,7 @@ Claudey, Acıbadem Üniversitesi hakkındaki soruları yanıtlayan Türkçe bir 
 |-------------|-----------------|-------------------------------------|-----------------------------------------|
 | `web`       | `acu_chat_app`  | Django 5.x, Python 3.12             | UI, REST API, RAG, scraper komutları    |
 | `db`        | `acuchat_db`    | PostgreSQL 15 Alpine                | Veri + full-text search                 |
-| `ai_engine` | `claudey_ai`    | Ollama + Qwen2.5-7B + nomic-embed   | Sohbet LLM'i + embedding modeli         |
+| `ai_engine` | `claudey_ai`    | Ollama + Qwen2.5-3B + nomic-embed   | Sohbet LLM'i + embedding modeli         |
 
 Host portları:
 - **8500** → web (`docker-compose.yml` içinde `8500:8000`)
@@ -51,8 +51,8 @@ Host portları:
 ### Gereksinimler
 
 - Docker Desktop / Docker Engine + Docker Compose v2
-- En az **8 GB boş RAM** (Qwen2.5-7B + embedding modeli için)
-- İlk çalıştırmada model indirmek için internet (~4.7 GB Qwen + ~270 MB nomic-embed-text)
+- En az **4 GB boş RAM** (Qwen2.5-3B + embedding modeli için)
+- İlk çalıştırmada model indirmek için internet (~1.9 GB Qwen + ~270 MB nomic-embed-text)
 
 ### Adım adım
 
@@ -375,7 +375,7 @@ claudey/
 
 - **Backend:** Django 5.x, Python 3.12
 - **DB:** PostgreSQL 15 (Full-Text Search), ChromaDB (vektör arama)
-- **LLM:** Ollama + Qwen2.5-7B-Instruct (chat, streaming) + `nomic-embed-text` (embedding)
+- **LLM:** Ollama + Qwen2.5-3B-Instruct (chat, streaming) + `nomic-embed-text` (embedding)
 - **Scraping:** BeautifulSoup4, lxml, Requests
 - **Frontend:** Vanilla HTML / CSS / JS + `ReadableStream` ile token akışı
 - **Container:** Docker, Docker Compose
