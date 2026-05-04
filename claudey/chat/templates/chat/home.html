@@ -129,6 +129,12 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .current-chat-title:empty::before {
+      content: 'Yeni Sohbet';
+      color: #475569;
+      font-weight: 500;
+      font-style: italic;
+    }
 
     .status-indicator { color: #10b981; font-size: 12px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
 
