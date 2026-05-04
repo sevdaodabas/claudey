@@ -550,6 +550,27 @@ def build_extra_note(intent):
     return ""
 
 
+def get_simple_chat_reply(user_msg):
+    """Selamlama / teşekkür gibi nezaket mesajlarını model çağırmadan yanıtlar."""
+    text = (user_msg or "").lower().strip()
+    if not text:
+        return None
+
+    if any(t in text for t in ("teşekkür", "tesekkur", "sağ ol", "sag ol", "eyvallah")):
+        return "Rica ederim."
+
+    if "nasılsın" in text or "nasilsin" in text:
+        return "İyiyim, teşekkür ederim. Size nasıl yardımcı olabilirim?"
+
+    if any(t in text for t in ("merhaba", "selam", "selamün", "selamun")) or text in ("hi", "hey", "hello"):
+        return "Merhaba, size nasıl yardımcı olabilirim?"
+
+    if text in ("iyiyim", "iyi", "ok", "tamam"):
+        return "Harika. Bir konuda yardımcı olmamı ister misiniz?"
+
+    return None
+
+
 @csrf_exempt
 def chat_api(request):
     """Kullanıcı mesajını işler ve AI yanıtını parça parça (streaming) döner."""
@@ -569,6 +590,28 @@ def chat_api(request):
     recent_history.reverse()
 
     is_chat_msg = any(kw in user_msg.lower() for kw in CHAT_KEYWORDS)
+
+    # Nezaket mesajları için sabit cevabı tek-parça stream et — model çağrısı yok.
+    # CHAT_KEYWORDS'ten bağımsız: kısa selamlama varyantları (örn. 'iyi') de yakalansın.
+    simple_chat_reply = get_simple_chat_reply(user_msg)
+    if simple_chat_reply:
+        if request.user.is_authenticated:
+            try:
+                ChatMessage.objects.create(
+                    user=request.user,
+                    user_query=user_msg,
+                    ai_response=simple_chat_reply,
+                )
+            except Exception as e:
+                print(f"DB save error: {e}")
+
+        def quick_reply():
+            yield simple_chat_reply
+
+        response = StreamingHttpResponse(quick_reply(), content_type="text/plain; charset=utf-8")
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
+        return response
 
     search_query = user_msg
     if not is_chat_msg and len(user_msg.split()) < 3 and recent_history:
