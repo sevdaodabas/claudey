@@ -680,8 +680,10 @@ def clean_generated_title(title, question):
     """AI'dan gelen başlığı temizler; geçersizse soru tabanlı başlığa döner."""
     title = re.sub(r"\s+", " ", title or "").strip()
     title = title.strip("\"'`“”‘’ ")
-    title = re.sub(r"^(başlık|baslik|title)\s*:\s*", "", title, flags=re.IGNORECASE).strip()
+    title = re.sub(r"^(başlık|baslik|title|konu)\s*[:\-]\s*", "", title, flags=re.IGNORECASE).strip()
     title = title.splitlines()[0].strip(" -•\t") if title else ""
+    title = title.strip("\"'`“”‘’ ")
+    title = re.sub(r"^(merhaba|selam|hi|hello)[\s,!.\-:]+", "", title, flags=re.IGNORECASE).strip()
 
     if not title or len(title) < 3:
         return fallback_title_from_question(question)
