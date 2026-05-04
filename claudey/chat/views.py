@@ -689,6 +689,20 @@ def clean_generated_title(title, question):
     return title[:TITLE_MAX_LENGTH].strip()
 
 
+def is_greeting_question(text):
+    """Kısa selamlama/teşekkür mesajlarını tespit eder; başlık üretirken Ollama'ya
+    gitmemek için kullanılır."""
+    if not text:
+        return True
+    cleaned = re.sub(r"[^\w\s]", " ", text.lower(), flags=re.UNICODE).strip()
+    if not cleaned:
+        return True
+    tokens = cleaned.split()
+    if len(tokens) > 4:
+        return False
+    return any(token in CHAT_KEYWORDS for token in tokens)
+
+
 @csrf_exempt
 def generate_title(request):
     """Verilen soru için kısa bir sohbet başlığı üretip JSON olarak döner."""
@@ -699,6 +713,10 @@ def generate_title(request):
             return JsonResponse({"title": "Yeni Sohbet"}, status=400)
 
         question = data.get("question", "")
+
+        if is_greeting_question(question):
+            return JsonResponse({"title": "Genel Sohbet"})
+
         title = fallback_title_from_question(question)
 
         try:
