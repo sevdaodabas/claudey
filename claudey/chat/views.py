@@ -573,29 +573,36 @@ def search_context(user_msg):
     return pg_results, vector_results
 
 
-def build_context(keyword_entries, vector_chunks, user_msg):
+def build_context(keyword_entries, vector_chunks, user_msg, context_query=None):
     """Bulunan kayıt ve chunk'ları modelin kullanacağı kısa bir bağlam metnine dönüştürür."""
     if not keyword_entries and not vector_chunks:
         return ""
 
-    keywords = extract_keywords(user_msg)
-    intent = detect_query_intent(user_msg)
+    retrieval_text = context_query or user_msg
+    keywords = extract_keywords(retrieval_text)
+    intent = detect_query_intent(retrieval_text)
     context_extractor = get_context_extractor(intent)
 
     parts = []
     seen_keys = set()
+    seen_parent_ids = set()
 
-    for entry in keyword_entries[:2]:
+    for entry in keyword_entries[:3]:
         relevant_text = (
             context_extractor(entry.content)
             if context_extractor
-            else extract_relevant_paragraphs(entry.content, keywords, max_chars=800)
+            else extract_relevant_paragraphs(entry.content, keywords, max_chars=1200)
         )
         if relevant_text:
-            parts.append(f"Kaynak: {entry.title}\n{relevant_text}")
+            parts.append(f"Kaynak: {entry.title}\nURL: {entry.url}\n{relevant_text}")
             seen_keys.add(str(entry.id))
+            seen_parent_ids.add(str(entry.id))
 
     for chunk in vector_chunks:
+        parent_id = str(chunk.get("parent_id") or "")
+        if parent_id and parent_id in seen_parent_ids:
+            continue
+
         key = f"{chunk.get('parent_id')}:{chunk.get('content')[:80]}"
         if key in seen_keys:
             continue
@@ -614,6 +621,8 @@ def build_context(keyword_entries, vector_chunks, user_msg):
 
         parts.append(f"Kaynak: {chunk.get('title')}\n{snippet}")
         seen_keys.add(key)
+        if parent_id:
+            seen_parent_ids.add(parent_id)
 
         if len(parts) >= 4:
             break
@@ -704,7 +713,7 @@ def chat_api(request):
     else:
         try:
             keyword_entries, vector_chunks = search_context(search_query)
-            context_text = build_context(keyword_entries, vector_chunks, user_msg)
+            context_text = build_context(keyword_entries, vector_chunks, user_msg, context_query=search_query)
         except Exception as e:
             print(f"RAG Error: {e}")
             context_text = ""
