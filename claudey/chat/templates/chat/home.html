@@ -460,11 +460,18 @@
         saveConversations();
 
         if (chat.messages.length === 2) {
-          chat.title = createFallbackTitle(message);
-          saveConversations();
-          renderSidebar();
-          updateCurrentChatTitle(chat.title);
-          generateChatTitle(chat.id, message);
+          if (isGreetingMessage(message)) {
+            chat.title = 'Genel Sohbet';
+            saveConversations();
+            renderSidebar();
+            updateCurrentChatTitle(chat.title);
+          } else {
+            chat.title = createFallbackTitle(message);
+            saveConversations();
+            renderSidebar();
+            updateCurrentChatTitle(chat.title);
+            generateChatTitle(chat.id, message);
+          }
         }
       } catch (error) {
         indicator.classList.remove('active');
@@ -477,6 +484,23 @@
 
       isSending = false;
       document.getElementById('sendBtn').disabled = false;
+    }
+
+    function isGreetingMessage(text) {
+      const normalized = (text || '')
+        .toLocaleLowerCase('tr-TR')
+        .replace(/[^\wçğıöşü\s]/g, ' ')
+        .trim();
+      if (!normalized) return true;
+      const words = normalized.split(/\s+/);
+      if (words.length > 4) return false;
+      const greetings = [
+        'merhaba', 'selam', 'selamun', 'selamlar', 'selamünaleyküm',
+        'günaydın', 'iyi', 'akşamlar', 'geceler',
+        'teşekkür', 'tesekkur', 'teşekkürler', 'tesekkurler', 'sağol', 'sagol', 'eyvallah',
+        'hi', 'hello', 'hey'
+      ];
+      return words.some(w => greetings.includes(w));
     }
 
     function createFallbackTitle(question) {
