@@ -207,11 +207,12 @@ def reindex_all(queryset, force=False, on_progress=None):
     for idx, entry in enumerate(queryset.iterator(), 1):
         status = index_entry(entry, force=force)
         stats[status] = stats.get(status, 0) + 1
-        if hasattr(entry, "content_hash"):
+        # content_hash sadece gerçekten yeniden indexlendiyse DB'ye yazılır;
+        # 'unchanged'/'empty'/'failed' durumlarında DB write gereksiz.
+        if status == "indexed" and hasattr(entry, "content_hash"):
             try:
                 entry.save(update_fields=["content_hash"])
             except Exception:
-                # content_hash alanı henüz migration uygulanmadıysa sessizce geç.
                 pass
         if on_progress:
             on_progress(idx, total, status, entry)
