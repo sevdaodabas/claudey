@@ -3,7 +3,7 @@ import re
 
 import requests
 from django.contrib.postgres.search import SearchQuery, SearchRank, SearchVector
-from django.http import JsonResponse
+from django.http import JsonResponse, StreamingHttpResponse
 from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
 
@@ -531,108 +531,124 @@ def build_extra_note(intent):
 
 @csrf_exempt
 def chat_api(request):
-    """Kullanıcı mesajını işler, uygun RAG bağlamını kurar ve AI yanıtını JSON olarak döner."""
-    if request.method == "POST":
+    """Kullanıcı mesajını işler ve AI yanıtını parça parça (streaming) döner."""
+    if request.method != "POST":
+        return JsonResponse({"reply": "Yalnızca POST destekleniyor."}, status=405)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"reply": "Geçersiz istek verisi gönderildi."}, status=400)
+
+    user_msg = (data.get("message") or "").strip()
+    if not user_msg:
+        return JsonResponse({"reply": "Lütfen bir mesaj yazın."}, status=400)
+
+    recent_history = list(get_message_queryset(request).order_by("-id")[:4])
+    recent_history.reverse()
+
+    is_chat_msg = any(kw in user_msg.lower() for kw in CHAT_KEYWORDS)
+
+    search_query = user_msg
+    if not is_chat_msg and len(user_msg.split()) < 3 and recent_history:
+        search_query = f"{recent_history[-1].user_query} {user_msg}"
+
+    intent = detect_query_intent(user_msg)
+
+    if is_chat_msg:
+        context_text = ""
+    else:
         try:
-            data = json.loads(request.body)
-        except json.JSONDecodeError:
-            return JsonResponse({"reply": "Geçersiz istek verisi gönderildi."}, status=400)
-
-        user_msg = (data.get("message") or "").strip()
-        if not user_msg:
-            return JsonResponse({"reply": "Lütfen bir mesaj yazın."}, status=400)
-
-        recent_history = list(get_message_queryset(request).order_by("-id")[:4])
-        recent_history.reverse()
-
-        is_chat_msg = any(kw in user_msg.lower() for kw in CHAT_KEYWORDS)
-
-        search_query = user_msg
-        if not is_chat_msg and len(user_msg.split()) < 3 and recent_history:
-            last_user_query = recent_history[-1].user_query
-            search_query = f"{last_user_query} {user_msg}"
-
-        intent = detect_query_intent(user_msg)
-
-        if is_chat_msg:
-            keyword_entries = []
-            vector_chunks = []
+            keyword_entries, vector_chunks = search_context(search_query)
+            context_text = build_context(keyword_entries, vector_chunks, user_msg)
+        except Exception as e:
+            print(f"RAG Error: {e}")
             context_text = ""
-        else:
-            try:
-                keyword_entries, vector_chunks = search_context(search_query)
-                context_text = build_context(keyword_entries, vector_chunks, user_msg)
-            except Exception as e:
-                print(f"RAG Error: {e}")
-                keyword_entries = []
-                vector_chunks = []
-                context_text = ""
 
-        if is_chat_msg:
-            user_content = (
-                f"--- KULLANICI MESAJI ---\n{user_msg}\n\n"
-                f"(Sistem Notu: Bu sadece bir nezaket/sohbet mesajı. Kendini tanıtmana gerek yok. "
-                f"Teşekkürse sadece 'Rica ederim', selamsa sadece 'Sizi dinliyorum / Nasıl yardımcı olabilirim?' gibi çok kısa, doğal bir cevap ver.)"
-            )
-        elif context_text:
-            extra_note = build_extra_note(intent)
-            note_suffix = f"\n\n(Sistem Notu: {extra_note})" if extra_note else ""
-            user_content = (
-                f"--- BAĞLAM BİLGİSİ ---\n{context_text}\n\n"
-                f"--- KULLANICI MESAJI ---\n{user_msg}"
-                f"{note_suffix}"
-            )
-        else:
-            user_content = (
-                f"--- KULLANICI MESAJI ---\n{user_msg}\n\n"
-                f"(Sistem Notu: Bu bir üniversite sorusu ancak veritabanında hiçbir bilgi yok. "
-                f"SADECE 'Bu konuda elimde yeterli bilgi bulunmuyor.' de ve konuyu kapat.)"
-            )
+    if is_chat_msg:
+        user_content = (
+            f"--- KULLANICI MESAJI ---\n{user_msg}\n\n"
+            f"(Sistem Notu: Sadece nezaket mesajı. Tek kısa cümleyle karşılık ver, kendini tanıtma.)"
+        )
+    elif context_text:
+        extra_note = build_extra_note(intent)
+        note_suffix = f"\n\n(Sistem Notu: {extra_note})" if extra_note else ""
+        user_content = (
+            f"--- BAĞLAM BİLGİSİ ---\n{context_text}\n\n"
+            f"--- KULLANICI MESAJI ---\n{user_msg}"
+            f"{note_suffix}"
+        )
+    else:
+        user_content = (
+            f"--- KULLANICI MESAJI ---\n{user_msg}\n\n"
+            f"(Sistem Notu: Bağlam yok. SADECE 'Bu konuda elimde yeterli bilgi bulunmuyor.' de.)"
+        )
 
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        for chat in recent_history[-2:]:
-            messages.append({"role": "user", "content": chat.user_query})
-            messages.append({"role": "assistant", "content": chat.ai_response})
-        messages.append({"role": "user", "content": user_content})
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for chat in recent_history[-2:]:
+        messages.append({"role": "user", "content": chat.user_query})
+        messages.append({"role": "assistant", "content": chat.ai_response})
+    messages.append({"role": "user", "content": user_content})
 
-        print("\n" + "=" * 50)
-        print("💡 RAG BAĞLAM:")
-        print(context_text[:200] + "..." if len(context_text) > 200 else context_text)
-        print("=" * 50 + "\n")
+    save_user = request.user if request.user.is_authenticated else None
 
+    def stream_reply():
+        collected = []
         try:
-            response = requests.post(
+            with requests.post(
                 OLLAMA_URL,
                 json={
                     "model": MODEL_NAME,
                     "messages": messages,
-                    "stream": False,
+                    "stream": True,
                     "options": OLLAMA_OPTIONS,
                 },
+                stream=True,
                 timeout=300,
-            )
+            ) as response:
+                for raw_line in response.iter_lines(decode_unicode=True):
+                    if not raw_line:
+                        continue
+                    try:
+                        chunk = json.loads(raw_line)
+                    except json.JSONDecodeError:
+                        continue
 
-            response_json = response.json()
-            print("\n" + "=" * 50)
-            print(f"DEBUG - OLLAMA YANITI: {response_json}")
-            print("=" * 50 + "\n")
+                    if "error" in chunk:
+                        err = f"Ollama Hatası: {chunk['error']}"
+                        yield err
+                        collected.append(err)
+                        break
 
-            if "error" in response_json:
-                ai_reply = f"Ollama Hatası: {response_json['error']}"
-            else:
-                ai_reply = response_json.get("message", {}).get("content", "").strip()
+                    piece = chunk.get("message", {}).get("content", "")
+                    if piece:
+                        collected.append(piece)
+                        yield piece
 
+                    if chunk.get("done"):
+                        break
         except Exception as e:
             print(f"AI Error: {e}")
-            ai_reply = "Yapay zeka servisi şu anda kullanılamıyor. Lütfen daha sonra tekrar deneyin."
+            fallback = "Yapay zeka servisi şu anda kullanılamıyor. Lütfen daha sonra tekrar deneyin."
+            yield fallback
+            collected.append(fallback)
+        finally:
+            if save_user is not None:
+                ai_reply = "".join(collected).strip()
+                if ai_reply:
+                    try:
+                        ChatMessage.objects.create(
+                            user=save_user,
+                            user_query=user_msg,
+                            ai_response=ai_reply,
+                        )
+                    except Exception as e:
+                        print(f"DB save error: {e}")
 
-        if request.user.is_authenticated:
-            ChatMessage.objects.create(
-                user=request.user,
-                user_query=user_msg,
-                ai_response=ai_reply,
-            )
-        return JsonResponse({"reply": ai_reply})
+    response = StreamingHttpResponse(stream_reply(), content_type="text/plain; charset=utf-8")
+    response["Cache-Control"] = "no-cache"
+    response["X-Accel-Buffering"] = "no"
+    return response
 
 
 def fallback_title_from_question(question):

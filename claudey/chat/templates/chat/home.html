@@ -418,20 +418,47 @@
       indicator.classList.add('active');
       document.getElementById('chatArea').scrollTop = document.getElementById('chatArea').scrollHeight;
 
+      let botBodyEl = null;
+      let fullReply = '';
       try {
         const response = await fetch('/chat-api/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message: message })
         });
-        const data = await response.json();
 
-        indicator.classList.remove('active');
-        appendMessage(data.reply, 'bot');
-        chat.messages.push({ text: data.reply, sender: 'bot' });
+        if (!response.ok || !response.body) {
+          throw new Error('Bağlantı hatası');
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        const chatArea = document.getElementById('chatArea');
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const piece = decoder.decode(value, { stream: true });
+          if (!piece) continue;
+
+          if (!botBodyEl) {
+            indicator.classList.remove('active');
+            botBodyEl = appendStreamingBotMessage();
+          }
+          fullReply += piece;
+          botBodyEl.textContent = fullReply;
+          chatArea.scrollTop = chatArea.scrollHeight;
+        }
+
+        if (!botBodyEl) {
+          indicator.classList.remove('active');
+          botBodyEl = appendStreamingBotMessage();
+          botBodyEl.textContent = '(Boş yanıt)';
+        }
+
+        chat.messages.push({ text: fullReply, sender: 'bot' });
         saveConversations();
 
-        // İlk mesajda başlık oluştur
         if (chat.messages.length === 2) {
           chat.title = createFallbackTitle(message);
           saveConversations();
@@ -441,7 +468,11 @@
         }
       } catch (error) {
         indicator.classList.remove('active');
-        appendMessage('Hata: Sunucuya bağlanılamadı.', 'bot');
+        if (botBodyEl) {
+          botBodyEl.textContent = (fullReply || '') + '\n[Bağlantı kesildi]';
+        } else {
+          appendMessage('Hata: Sunucuya bağlanılamadı.', 'bot');
+        }
       }
 
       isSending = false;
@@ -494,6 +525,27 @@
       const chatTitle = title === 'Yeni Sohbet' ? '' : (title || '');
       titleElement.textContent = chatTitle;
       titleElement.title = chatTitle;
+    }
+
+    function appendStreamingBotMessage() {
+      const chatArea = document.getElementById('chatArea');
+      const indicator = document.getElementById('typingIndicator');
+
+      const wrapper = document.createElement('div');
+      wrapper.className = 'message bot';
+
+      const header = document.createElement('div');
+      header.className = 'bot-header';
+      header.textContent = 'Claudey';
+
+      const body = document.createElement('div');
+      body.style.whiteSpace = 'pre-wrap';
+
+      wrapper.appendChild(header);
+      wrapper.appendChild(body);
+      chatArea.insertBefore(wrapper, indicator);
+      chatArea.scrollTop = chatArea.scrollHeight;
+      return body;
     }
 
     function appendMessage(text, sender, scroll = true) {
