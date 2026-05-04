@@ -20,7 +20,7 @@ from .vector_service import collection, get_embedding
 from scraper.models import UniversityData
 
 OLLAMA_URL = "http://claudey_ai:11434/api/chat"
-MODEL_NAME = "qwen2.5:7b"
+MODEL_NAME = "qwen2.5:3b"
 OLLAMA_KEEP_ALIVE = "30m"
 
 SYSTEM_PROMPT = (
