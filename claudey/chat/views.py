@@ -725,12 +725,25 @@ def generate_title(request):
                 json={
                     "model": MODEL_NAME,
                     "messages": [
-                        {"role": "system", "content": "Verilen soruya dayanarak çok kısa bir sohbet başlığı oluştur. En fazla 4-5 kelime. Türkçe yaz. Sadece başlığı yaz."},
-                        {"role": "user", "content": question},
+                        {
+                            "role": "system",
+                            "content": (
+                                "Kullanıcının mesajının ANA KONUSUNU yansıtan kısa bir sohbet başlığı üret. "
+                                "Kurallar: en fazla 4 kelime, Türkçe, baş harfler büyük (Title Case), "
+                                "tırnak/noktalama YOK, 'Merhaba'/'Selam' ile başlama, "
+                                "'Sohbet'/'Soru'/'Hakkında' kelimelerini kullanma. "
+                                "Sadece başlığı yaz, başka bir şey yazma.\n\n"
+                                "Örnekler:\n"
+                                "Soru: Burs imkanlari nelerdir? -> Burs İmkânları\n"
+                                "Soru: Tıp fakültesi kaç yıl? -> Tıp Fakültesi Süresi\n"
+                                "Soru: Kampüse nasıl ulaşırım? -> Kampüse Ulaşım"
+                            ),
+                        },
+                        {"role": "user", "content": f"Soru: {question}"},
                     ],
                     "stream": False,
                     "keep_alive": OLLAMA_KEEP_ALIVE,
-                    "options": {"temperature": 0.5, "num_ctx": 512, "num_predict": 20},
+                    "options": {"temperature": 0.2, "top_p": 0.8, "num_ctx": 512, "num_predict": 20},
                 },
                 timeout=60,
             )
