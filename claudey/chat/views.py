@@ -28,7 +28,7 @@ SYSTEM_PROMPT = (
     "1. SOHBET: Teşekkür veya selamlama mesajlarına çok kısa, doğal bir karşılık ver (Örn: 'Rica ederim', 'Sizi dinliyorum.'). Sohbetin başında kendini zaten tanıttın, bu yüzden kendini tekrar tanıtma veya uzun uzun selam verme.\n"
     "2. BİLGİ: Üniversite sorularında SADECE verilen BAĞLAM BİLGİSİ'ni kullan.\n"
     "3. ADRES: Kullanıcı yalnız adres veya konum soruyorsa sadece adres ver; telefon, e-posta, ulaşım tarifi veya ek bilgi verme.\n"
-    "4. KALİTE: Bağlamdaki bilgileri birleştirerek cevap ver; bağlamda olmayan ayrıntı, tarih, ücret, kontenjan, hat veya kişi adı uydurma.\n"
+    "4. KALİTE: Bağlamdaki bilgileri birleştirerek cevap ver; bağlamda olmayan ayrıntı, tarih, ücret, kontenjan, hat veya kişi adı uydurma. Markdown başlıkları kullanma; düz metin veya kısa maddelerle yaz.\n"
     "5. BİLİNMEYEN: Bağlamda cevap yoksa sadece 'Bu konuda elimde yeterli bilgi bulunmuyor.' de."
 )
 
@@ -36,7 +36,7 @@ OLLAMA_OPTIONS = {
     "temperature": 0.2,
     "top_p": 0.85,
     "num_ctx": 3072,
-    "num_predict": 220,
+    "num_predict": 420,
 }
 
 TITLE_MAX_LENGTH = 50
