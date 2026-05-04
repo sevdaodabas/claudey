@@ -328,15 +328,65 @@ def extract_relevant_paragraphs(content, keywords, max_chars=800):
     result = []
     total = 0
     for _, para in scored:
-        if total + len(para) > max_chars:
+        paragraph_text = (
+            extract_keyword_window(para, keywords, max_chars - total)
+            if len(para) > max_chars - total
+            else para
+        )
+        if total + len(paragraph_text) > max_chars:
             remaining = max_chars - total
             if remaining > 80:
-                result.append(para[:remaining])
+                result.append(extract_keyword_window(para, keywords, remaining))
             break
-        result.append(para)
-        total += len(para)
+        result.append(paragraph_text)
+        total += len(paragraph_text)
 
     return "\n\n".join(result)
+
+
+def extract_keyword_window(text, keywords, max_chars):
+    """Uzun tek paragraflarda sayfa başı yerine eşleşen terimlerin çevresini döndürür.
+    Tablo başlığı (`|` içeren ilk satır) algılanırsa korunur ki ücret/program tabloları
+    bağlamdan kopuk kalmasın."""
+    if not text or max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+
+    lower_text = text.lower()
+    candidate_positions = []
+    for keyword in keywords:
+        position = lower_text.find(keyword.lower())
+        if position >= 0:
+            candidate_positions.append(position)
+
+    if not candidate_positions:
+        return text[:max_chars].strip()
+
+    best_start = 0
+    best_score = -1
+    for position in candidate_positions:
+        start = max(0, position - (max_chars // 3))
+        end = min(len(text), start + max_chars)
+        start = max(0, end - max_chars)
+        window = lower_text[start:end]
+        score = sum(1 for kw in keywords if kw.lower() in window)
+        if score > best_score:
+            best_score = score
+            best_start = start
+
+    snippet = text[best_start:best_start + max_chars].strip()
+    if "|" in snippet and "|" in text[:500]:
+        table_header = text[:min(360, text.find("|") + 260)].strip()
+        if table_header and table_header not in snippet:
+            remaining = max_chars - len(table_header) - 5
+            if remaining > 80:
+                snippet = f"{table_header}\n...\n{snippet[:remaining].strip()}"
+    if best_start > 0:
+        snippet = "..." + snippet
+    if best_start + max_chars < len(text):
+        snippet += "..."
+    return snippet
 
 
 def extract_location_context(content, max_chars=320):
