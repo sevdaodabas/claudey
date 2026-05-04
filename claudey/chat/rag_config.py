@@ -50,4 +50,11 @@ INTENT_PROMPT_NOTES = {
         "Konumu doğrudan söyle. Gerekmedikçe 'adresi şöyledir' gibi resmi kalıplar kullanma. "
         "Telefon, e-posta, ulaşım tarifi veya başka ek bilgi verme. Cevabı kısa tut."
     ),
+    'fee': (
+        "Kullanıcı öğrenim ücreti soruyor. Bağlamdaki tablo/satır bilgisini esas al ve görünen tutarları atlama. "
+        "Sütun başlığı görünüyorsa tutarı o başlıkla etiketle; görünmüyorsa etiket uydurma. "
+        "Yeni hesaplama, indirim/burs uygulama veya net ödeme çıkarımı yapma. "
+        "İsteğe bağlı hazırlık programı soruluyorsa sadece 350.000 TL ücretini ve burs/indirim uygulanmadığı notunu söyle. "
+        "İsteğe bağlı hazırlık için 'burslar ve indirimler uygulandıktan sonra kalan tutar ödenir' deme."
+    ),
 }
