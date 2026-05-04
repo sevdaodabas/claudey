@@ -172,6 +172,12 @@
       line-height: 1.6;
       font-size: 15px;
       position: relative;
+      animation: msgIn 0.22s ease-out;
+    }
+
+    @keyframes msgIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
     }
 
     .user {
@@ -179,6 +185,7 @@
       color: white;
       align-self: flex-end;
       border-bottom-right-radius: 2px;
+      box-shadow: 0 2px 8px rgba(29, 78, 216, 0.25);
     }
 
     .bot {
@@ -188,7 +195,13 @@
       padding-left: 0;
     }
 
-    .bot-header { font-size: 12px; color: #64748b; margin-bottom: 5px; }
+    .bot-header {
+      font-size: 12px;
+      color: #94a3b8;
+      margin-bottom: 5px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+    }
 
     /* Giriş Alanı */
     .input-area {
