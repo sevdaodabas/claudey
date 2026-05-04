@@ -50,4 +50,12 @@ INTENT_PROMPT_NOTES = {
         "Konumu doğrudan söyle. Gerekmedikçe 'adresi şöyledir' gibi resmi kalıplar kullanma. "
         "Telefon, e-posta, ulaşım tarifi veya başka ek bilgi verme. Cevabı kısa tut."
     ),
+    'fee': (
+        "Kullanıcı öğrenim ücretini soruyor. Bağlamdaki tablo/satır bilgisini esas al, "
+        "görünen tutarları (ör. '1.175.000₺') aynen ve eksiksiz aktar. "
+        "Sütun başlığı görünüyorsa tutarı o başlıkla etiketle (örn. 'Tıp Fakültesi (İngilizce)'); "
+        "görünmüyorsa etiket UYDURMA. "
+        "Yeni hesaplama, indirim/burs uygulayarak net tutar çıkarımı YAPMA. "
+        "Sadece bağlamda yer alan rakam ve programlardan bahset."
+    ),
 }

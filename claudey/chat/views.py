@@ -644,6 +644,8 @@ def build_context(keyword_entries, vector_chunks, user_msg, context_query=None):
 
 def build_extra_note(intent):
     """Bazı intent'ler için prompt'a eklenecek ek yönlendirme notunu döndürür."""
+    if intent["is_fee"]:
+        return INTENT_PROMPT_NOTES["fee"]
     if intent["is_transport"]:
         return INTENT_PROMPT_NOTES["transport"]
     if intent["is_location"]:
