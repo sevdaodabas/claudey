@@ -58,6 +58,10 @@ CHAT_OLLAMA_OPTIONS = {
 }
 
 TITLE_MAX_LENGTH = 50
+VECTOR_DISTANCE_LIMIT = 1.2
+MIN_STRONG_KEYWORD_SCORE = 1.6
+FEE_HINTS = ("ücret", "ucret", "fiyat", "öğrenim ücreti", "ogrenim ucreti")
+SCHOLARSHIP_HINTS = ("burs", "indirim")
 
 # Ücret / burs sorularını ayırt etmek için ipuçları.
 FEE_HINTS = ("ücret", "ucret", "fiyat", "öğrenim ücreti", "ogrenim ucreti", "ne kadar")

@@ -90,6 +90,37 @@ def extract_title(soup, url):
     return urlparse(url).path.strip('/').split('/')[-1].replace('-', ' ').title()[:300]
 
 
+def extract_tables_text(container):
+    """HTML tablolarını sütun ilişkisi korunacak şekilde satır satır metne çevir."""
+    table_blocks = []
+    for table in container.find_all('table'):
+        rows = []
+        headers = []
+        for tr in table.find_all('tr'):
+            cells = [
+                normalize_text(cell.get_text(separator=' '))
+                for cell in tr.find_all(['th', 'td'])
+            ]
+            while cells and not cells[-1]:
+                cells.pop()
+            if any(cells):
+                if len(cells) > 1 and not headers:
+                    headers = cells
+                    rows.append(' | '.join(cells))
+                elif headers and len(cells) > 1:
+                    labeled_cells = [
+                        f"{headers[index]}: {cell}"
+                        for index, cell in enumerate(cells)
+                        if cell and index < len(headers)
+                    ]
+                    rows.append('; '.join(labeled_cells))
+                else:
+                    rows.append(' | '.join(cells))
+        if rows:
+            table_blocks.append('\n'.join(rows))
+    return '\n\n'.join(table_blocks)
+
+
 def extract_main_content(soup, url):
     is_contact = 'iletisim' in url.lower() or 'ulasim' in url.lower()
     
@@ -115,7 +146,10 @@ def extract_main_content(soup, url):
     
     if not main:
         return ''
-    return normalize_text(main.get_text(separator='\n'))
+
+    table_text = extract_tables_text(main)
+    page_text = normalize_text(main.get_text(separator='\n'))
+    return normalize_text(f"{table_text}\n\n{page_text}" if table_text else page_text)
 
 
 def guess_category(url):
