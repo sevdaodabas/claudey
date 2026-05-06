@@ -175,10 +175,14 @@ class Command(BaseCommand):
                             help='Maximum number of pages to scrape (default: 100)')
         parser.add_argument('--delay', type=float, default=1.0,
                             help='Delay between requests in seconds (default: 1.0)')
+        parser.add_argument('--no-reindex', action='store_true',
+                            help='Tarama bittiğinde otomatik vektör reindex çalıştırma '
+                                 '(varsayılan: çalıştırır — yalnız değişen sayfalar embed edilir).')
 
     def handle(self, *args, **options):
         max_pages = options['max_pages']
         delay = options['delay']
+        skip_reindex = options['no_reindex']
 
         self.stdout.write(f"BFS scraping starting... (limit: {max_pages}, delay: {delay}s)")
 
@@ -260,3 +264,20 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(
             f"\nTamamlandı! {saved} sayfa kaydedildi (Toplam {len(visited)} URL ziyaret edildi)"
         ))
+
+        if skip_reindex:
+            self.stdout.write(self.style.NOTICE(
+                "\nVektör reindex atlandı (--no-reindex). Manuel çalıştırmak için: "
+                "python manage.py reindex_vectors"
+            ))
+            return
+
+        if saved == 0:
+            self.stdout.write(self.style.NOTICE("\nYeni/değişen sayfa yok, vektör reindex atlandı."))
+            return
+
+        self.stdout.write(self.style.HTTP_INFO(
+            "\nVektör indeksi güncelleniyor (yalnız değişen sayfalar embed edilir)..."
+        ))
+        from django.core.management import call_command
+        call_command("reindex_vectors", source="main_site")

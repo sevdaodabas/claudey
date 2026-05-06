@@ -23,6 +23,9 @@ class UniversityData(models.Model):
     source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default='main_site')
     level = models.CharField(max_length=50, blank=True, default='')
     scraped_at = models.DateTimeField(auto_now_add=True)
+    # Vektör indeksi ile DB'yi senkron tutmak için son indexlenen içeriğin SHA256'sı.
+    # Reindex sırasında bu alan güncellenir; eşleşiyorsa o kayıt yeniden embed edilmez.
+    content_hash = models.CharField(max_length=64, blank=True, default='', db_index=True)
 
     class Meta:
         verbose_name = "University Data"

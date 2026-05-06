@@ -17,6 +17,13 @@
 
     * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Segoe UI', Tahoma, sans-serif; }
 
+    /* İnce, koyu temaya uygun scrollbar */
+    *::-webkit-scrollbar { width: 8px; height: 8px; }
+    *::-webkit-scrollbar-track { background: transparent; }
+    *::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+    *::-webkit-scrollbar-thumb:hover { background: #475569; }
+    * { scrollbar-width: thin; scrollbar-color: #334155 transparent; }
+
     body {
       background: var(--bg-dark);
       color: var(--text-main);
@@ -62,11 +69,14 @@
       padding: 12px;
       cursor: pointer;
       border-radius: 10px;
-      font-weight: bold;
-      transition: 0.3s;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+      box-shadow: 0 2px 10px rgba(249, 115, 22, 0.25);
+      transition: background 0.2s ease, transform 0.12s ease, box-shadow 0.2s ease;
     }
 
-    .new-chat-btn:hover { opacity: 0.9; transform: scale(0.98); }
+    .new-chat-btn:hover { background: #ea6a0e; box-shadow: 0 4px 14px rgba(249, 115, 22, 0.35); }
+    .new-chat-btn:active { transform: scale(0.98); }
 
     .history-label {
       padding: 0 20px 10px;
@@ -87,7 +97,11 @@
     }
 
     .chat-item:hover { background: #1e293b; color: white; }
-    .chat-item.active { background: #1e3a8a; color: white; }
+    .chat-item.active {
+      background: #1e3a8a;
+      color: white;
+      box-shadow: inset 3px 0 0 var(--accent-orange);
+    }
     .chat-item span {
       display: flex; align-items: center; gap: 10px;
       min-width: 0; flex: 1;
@@ -121,6 +135,12 @@
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+    .current-chat-title:empty::before {
+      content: 'Yeni Sohbet';
+      color: #475569;
+      font-weight: 500;
+      font-style: italic;
     }
 
     .status-indicator { color: #10b981; font-size: 12px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
@@ -172,6 +192,12 @@
       line-height: 1.6;
       font-size: 15px;
       position: relative;
+      animation: msgIn 0.22s ease-out;
+    }
+
+    @keyframes msgIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
     }
 
     .user {
@@ -179,6 +205,7 @@
       color: white;
       align-self: flex-end;
       border-bottom-right-radius: 2px;
+      box-shadow: 0 2px 8px rgba(29, 78, 216, 0.25);
     }
 
     .bot {
@@ -187,8 +214,15 @@
       align-self: flex-start;
       padding-left: 0;
     }
+    .bot > div:not(.bot-header) { white-space: pre-wrap; word-wrap: break-word; }
 
-    .bot-header { font-size: 12px; color: #64748b; margin-bottom: 5px; }
+    .bot-header {
+      font-size: 12px;
+      color: #94a3b8;
+      margin-bottom: 5px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+    }
 
     /* Giriş Alanı */
     .input-area {
@@ -203,21 +237,29 @@
       display: flex; padding: 10px 15px;
       align-items: center;
       box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+      transition: border-color 0.18s ease, box-shadow 0.18s ease;
+    }
+    .input-wrapper:focus-within {
+      border-color: var(--accent-orange);
+      box-shadow: 0 4px 18px rgba(249, 115, 22, 0.18);
     }
 
     .input-wrapper input {
       flex: 1; background: transparent; border: none;
       color: white; padding: 10px; outline: none; font-size: 16px;
     }
+    .input-wrapper input::placeholder { color: #64748b; }
 
     .send-btn {
       background: var(--accent-orange);
       color: white; border: none;
       width: 40px; height: 40px; border-radius: 10px;
       cursor: pointer; display: flex; align-items: center; justify-content: center;
-      transition: 0.2s;
+      transition: background 0.18s ease, transform 0.12s ease;
     }
-    .send-btn:disabled { background: #334155; cursor: not-allowed; }
+    .send-btn:hover:not(:disabled) { background: #ea6a0e; }
+    .send-btn:active:not(:disabled) { transform: scale(0.94); }
+    .send-btn:disabled { background: #334155; cursor: not-allowed; opacity: 0.7; }
 
     /* Typing Indicator */
     .typing-indicator { display: none; align-self: flex-start; gap: 5px; padding: 10px; }
@@ -418,34 +460,89 @@
       indicator.classList.add('active');
       document.getElementById('chatArea').scrollTop = document.getElementById('chatArea').scrollHeight;
 
+      let botBodyEl = null;
+      let fullReply = '';
       try {
         const response = await fetch('/chat-api/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message: message })
         });
-        const data = await response.json();
 
-        indicator.classList.remove('active');
-        appendMessage(data.reply, 'bot');
-        chat.messages.push({ text: data.reply, sender: 'bot' });
+        if (!response.ok || !response.body) {
+          throw new Error('Bağlantı hatası');
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        const chatArea = document.getElementById('chatArea');
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const piece = decoder.decode(value, { stream: true });
+          if (!piece) continue;
+
+          if (!botBodyEl) {
+            indicator.classList.remove('active');
+            botBodyEl = appendStreamingBotMessage();
+          }
+          fullReply += piece;
+          botBodyEl.textContent = fullReply;
+          chatArea.scrollTop = chatArea.scrollHeight;
+        }
+
+        if (!botBodyEl) {
+          indicator.classList.remove('active');
+          botBodyEl = appendStreamingBotMessage();
+          botBodyEl.textContent = '(Boş yanıt)';
+        }
+
+        chat.messages.push({ text: fullReply, sender: 'bot' });
         saveConversations();
 
-        // İlk mesajda başlık oluştur
         if (chat.messages.length === 2) {
-          chat.title = createFallbackTitle(message);
-          saveConversations();
-          renderSidebar();
-          updateCurrentChatTitle(chat.title);
-          generateChatTitle(chat.id, message);
+          if (isGreetingMessage(message)) {
+            chat.title = 'Genel Sohbet';
+            saveConversations();
+            renderSidebar();
+            updateCurrentChatTitle(chat.title);
+          } else {
+            chat.title = createFallbackTitle(message);
+            saveConversations();
+            renderSidebar();
+            updateCurrentChatTitle(chat.title);
+            generateChatTitle(chat.id, message);
+          }
         }
       } catch (error) {
         indicator.classList.remove('active');
-        appendMessage('Hata: Sunucuya bağlanılamadı.', 'bot');
+        if (botBodyEl) {
+          botBodyEl.textContent = (fullReply || '') + '\n[Bağlantı kesildi]';
+        } else {
+          appendMessage('Hata: Sunucuya bağlanılamadı.', 'bot');
+        }
       }
 
       isSending = false;
       document.getElementById('sendBtn').disabled = false;
+    }
+
+    function isGreetingMessage(text) {
+      const normalized = (text || '')
+        .toLocaleLowerCase('tr-TR')
+        .replace(/[^\wçğıöşü\s]/g, ' ')
+        .trim();
+      if (!normalized) return true;
+      const words = normalized.split(/\s+/);
+      if (words.length > 4) return false;
+      const greetings = [
+        'merhaba', 'selam', 'selamun', 'selamlar', 'selamünaleyküm',
+        'günaydın', 'iyi', 'akşamlar', 'geceler',
+        'teşekkür', 'tesekkur', 'teşekkürler', 'tesekkurler', 'sağol', 'sagol', 'eyvallah',
+        'hi', 'hello', 'hey'
+      ];
+      return words.some(w => greetings.includes(w));
     }
 
     function createFallbackTitle(question) {
@@ -481,7 +578,7 @@
         const data = await response.json();
         const chat = conversations.find(c => c.id === chatId);
         if (chat && data.title) {
-          chat.title = createFallbackTitle(data.title);
+          chat.title = truncateAtWord(data.title, 50);
           saveConversations();
           renderSidebar();
           if (chat.id === currentChatId) updateCurrentChatTitle(chat.title);
@@ -494,6 +591,27 @@
       const chatTitle = title === 'Yeni Sohbet' ? '' : (title || '');
       titleElement.textContent = chatTitle;
       titleElement.title = chatTitle;
+    }
+
+    function appendStreamingBotMessage() {
+      const chatArea = document.getElementById('chatArea');
+      const indicator = document.getElementById('typingIndicator');
+
+      const wrapper = document.createElement('div');
+      wrapper.className = 'message bot';
+
+      const header = document.createElement('div');
+      header.className = 'bot-header';
+      header.textContent = 'Claudey';
+
+      const body = document.createElement('div');
+      body.style.whiteSpace = 'pre-wrap';
+
+      wrapper.appendChild(header);
+      wrapper.appendChild(body);
+      chatArea.insertBefore(wrapper, indicator);
+      chatArea.scrollTop = chatArea.scrollHeight;
+      return body;
     }
 
     function appendMessage(text, sender, scroll = true) {

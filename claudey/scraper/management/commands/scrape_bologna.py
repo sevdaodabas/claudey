@@ -78,9 +78,13 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--delay', type=float, default=1.5,
                             help='Delay between requests in seconds (default: 1.5)')
+        parser.add_argument('--no-reindex', action='store_true',
+                            help='Tarama bittiğinde otomatik vektör reindex çalıştırma '
+                                 '(varsayılan: çalıştırır — yalnız değişen sayfalar embed edilir).')
 
     def handle(self, *args, **options):
         delay = options['delay']
+        skip_reindex = options['no_reindex']
         saved = 0
 
         # General pages
@@ -141,3 +145,20 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.ERROR(f"  Error: {e}"))
 
         self.stdout.write(self.style.SUCCESS(f"\nDone! {saved} Bologna pages saved"))
+
+        if skip_reindex:
+            self.stdout.write(self.style.NOTICE(
+                "\nVektör reindex atlandı (--no-reindex). Manuel çalıştırmak için: "
+                "python manage.py reindex_vectors"
+            ))
+            return
+
+        if saved == 0:
+            self.stdout.write(self.style.NOTICE("\nYeni/değişen sayfa yok, vektör reindex atlandı."))
+            return
+
+        self.stdout.write(self.style.HTTP_INFO(
+            "\nVektör indeksi güncelleniyor (yalnız değişen sayfalar embed edilir)..."
+        ))
+        from django.core.management import call_command
+        call_command("reindex_vectors", source="bologna")

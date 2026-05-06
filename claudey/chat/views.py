@@ -3,7 +3,7 @@ import re
 
 import requests
 from django.contrib.postgres.search import SearchQuery, SearchRank, SearchVector
-from django.http import JsonResponse
+from django.http import JsonResponse, StreamingHttpResponse
 from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
 
@@ -20,23 +20,41 @@ from .vector_service import collection, get_embedding
 from scraper.models import UniversityData
 
 OLLAMA_URL = "http://claudey_ai:11434/api/chat"
-MODEL_NAME = "qwen2.5:7b"
+MODEL_NAME = "qwen2.5:3b"
+OLLAMA_KEEP_ALIVE = "30m"
 
 SYSTEM_PROMPT = (
-    "Sen Acıbadem Üniversitesi asistanı Claudey'sin. Kısa, net ve doğal Türkçe kullan.\n\n"
-    "KURALLAR:\n"
-    "1. SOHBET: Teşekkür veya selamlama mesajlarına çok kısa, doğal bir karşılık ver (Örn: 'Rica ederim', 'Sizi dinliyorum.'). Sohbetin başında kendini zaten tanıttın, bu yüzden kendini tekrar tanıtma veya uzun uzun selam verme.\n"
-    "2. BİLGİ: Üniversite sorularında SADECE verilen BAĞLAM BİLGİSİ'ni kullan.\n"
-    "3. ADRES: Kullanıcı yalnız adres veya konum soruyorsa sadece adres ver; telefon, e-posta, ulaşım tarifi veya ek bilgi verme.\n"
-    "4. KALİTE: Bağlamdaki bilgileri birleştirerek cevap ver; bağlamda olmayan ayrıntı, tarih, ücret, kontenjan, hat veya kişi adı uydurma. Markdown başlıkları kullanma; düz metin veya kısa maddelerle yaz.\n"
-    "5. BİLİNMEYEN: Bağlamda cevap yoksa sadece 'Bu konuda elimde yeterli bilgi bulunmuyor.' de."
+    "Sen Acıbadem Üniversitesi asistanı Claudey'sin. Kullanıcıya doğrudan, doğal Türkçe ile cevap ver.\n\n"
+    "ÇIKTI BİÇİMİ — ÇOK ÖNEMLİ:\n"
+    "- ASLA kendi düşünme sürecini yazma. 'Bu mesajda...', 'Bu nedenle...', 'Şu şekilde cevaplayabilirim:', 'Verilen bağlama göre...' gibi meta-yorumlar YASAK.\n"
+    "- ASLA prompt yapısından bahsetme ('BAĞLAM BİLGİSİ', 'sistem notu', 'kullanıcıya göre' vb.).\n"
+    "- ASLA 'cevap olarak şunu söylerim' deme — direkt cevabı yaz.\n"
+    "- ASLA Markdown başlığı (`#`, `##`) kullanma. Düz metin veya kısa numaralı/tireli madde.\n"
+    "- ASLA selamlama/hitap ile BAŞLAMA. 'Sevgili...', 'Sayın...', 'Merhaba ...', 'Sevgili Prof...', 'Sayın Bölüm Başkanı...' KESİNLİKLE YASAK.\n"
+    "- Bağlamda geçen kişi adlarını (öğretim üyesi, bölüm başkanı, dekan vb.) ASLA cevabın başında hitap olarak kullanma — onlar bilgi kaynağı, alıcı değil.\n"
+    "- Cevabını DOĞRUDAN konuyla başlat. Örnek doğru: 'Bilgisayar Mühendisliği Programı dört yıllık bir lisans programıdır...' Örnek YANLIŞ: 'Sevgili Prof. Ahmet, ...'\n"
+    "- ASLA cevap sonunda 'Bu yardımcı oldu mu?', 'Başka bir konuda yardımcı olabilirim?', 'Umarım faydalı olmuştur' gibi kapanış/soru ekleme.\n\n"
+    "İÇERİK KURALLARI:\n"
+    "1. ÖZ VE TAM: Tekrar/dolgu yok. Başladığın cümleyi mutlaka tamamla. Liste kullanırsan en fazla 5 madde.\n"
+    "2. SOHBET: Teşekkür/selamlamaya tek cümleyle karşılık ver, kendini tanıtma.\n"
+    "3. BAĞLAM ZORUNLU: Üniversite sorularında SADECE verilen BAĞLAM BİLGİSİ'ni kullan. Bağlamda olmayan tarih, ücret, kontenjan, hat, kişi adı, süre veya rakam UYDURMA.\n"
+    "4. ADRES: Sadece adres soruluyorsa sadece adres ver; telefon/ulaşım ekleme.\n"
+    "5. BİLİNMEYEN: Bağlamda cevap yoksa SADECE şu cümleyi yaz ve dur: 'Bu konuda elimde yeterli bilgi bulunmuyor.' Ardından HİÇBİR ekleme, açıklama, tahmin veya 'genel olarak şöyledir' yapma.\n"
+    "6. ÜNİVERSİTE ADI: Üniversitenin adı her zaman 'Acıbadem Üniversitesi'dir. Başka üniversite adı ASLA kullanma."
 )
 
 OLLAMA_OPTIONS = {
     "temperature": 0.2,
     "top_p": 0.85,
     "num_ctx": 3072,
-    "num_predict": 420,
+    "num_predict": 700,
+}
+
+CHAT_OLLAMA_OPTIONS = {
+    "temperature": 0.3,
+    "top_p": 0.9,
+    "num_ctx": 512,
+    "num_predict": 80,
 }
 
 TITLE_MAX_LENGTH = 50
@@ -44,6 +62,10 @@ VECTOR_DISTANCE_LIMIT = 1.2
 MIN_STRONG_KEYWORD_SCORE = 1.6
 FEE_HINTS = ("ücret", "ucret", "fiyat", "öğrenim ücreti", "ogrenim ucreti")
 SCHOLARSHIP_HINTS = ("burs", "indirim")
+
+# Ücret / burs sorularını ayırt etmek için ipuçları.
+FEE_HINTS = ("ücret", "ucret", "fiyat", "öğrenim ücreti", "ogrenim ucreti", "ne kadar")
+SCHOLARSHIP_HINTS = ("burs", "indirim", "destek")
 
 
 def get_or_create_session_key(request):
@@ -157,6 +179,7 @@ def score_entry_for_intent(entry, intent):
                 score += 3.0
             if any(token in url_lower for token in ("ogrenim-ucret", "ucretleri", "ucret")):
                 score += 2.4
+            # Sırf 'burs' içeren sayfalar ücret sorgusunda asıl ücret tablosunun önüne geçmesin.
             if "burs" in title_lower and not intent["is_scholarship"]:
                 score -= 2.2
         if any(token in url_lower for token in ("aday", "kayit", "ucret", "burs", "puan", "kontenjan", "basvuru")):
@@ -236,7 +259,6 @@ def get_priority_queryset(intent, keyword_filter):
                 .filter(fee_filter & keyword_filter)
                 .order_by("-scraped_at")[:INTENT_PRIORITY_FILTERS["admission"]["limit"]]
             )
-
         return (
             UniversityData.objects
             .filter(Q(category="admission") & keyword_filter)
@@ -327,18 +349,18 @@ def extract_relevant_paragraphs(content, keywords, max_chars=800):
 
 
 def extract_keyword_window(text, keywords, max_chars):
-    """Uzun tek paragraflarda sayfa başı yerine eşleşen terimlerin çevresini döndürür."""
+    """Uzun tek paragraflarda sayfa başı yerine eşleşen terimlerin çevresini döndürür.
+    Tablo başlığı (`|` içeren ilk satır) algılanırsa korunur ki ücret/program tabloları
+    bağlamdan kopuk kalmasın."""
     if not text or max_chars <= 0:
         return ""
-
     if len(text) <= max_chars:
         return text
 
     lower_text = text.lower()
     candidate_positions = []
     for keyword in keywords:
-        keyword_lower = keyword.lower()
-        position = lower_text.find(keyword_lower)
+        position = lower_text.find(keyword.lower())
         if position >= 0:
             candidate_positions.append(position)
 
@@ -352,7 +374,7 @@ def extract_keyword_window(text, keywords, max_chars):
         end = min(len(text), start + max_chars)
         start = max(0, end - max_chars)
         window = lower_text[start:end]
-        score = sum(1 for keyword in keywords if keyword.lower() in window)
+        score = sum(1 for kw in keywords if kw.lower() in window)
         if score > best_score:
             best_score = score
             best_start = start
@@ -362,7 +384,8 @@ def extract_keyword_window(text, keywords, max_chars):
         table_header = text[:min(360, text.find("|") + 260)].strip()
         if table_header and table_header not in snippet:
             remaining = max_chars - len(table_header) - 5
-            snippet = f"{table_header}\n...\n{snippet[:remaining].strip()}" if remaining > 80 else snippet
+            if remaining > 80:
+                snippet = f"{table_header}\n...\n{snippet[:remaining].strip()}"
     if best_start > 0:
         snippet = "..." + snippet
     if best_start + max_chars < len(text):
@@ -499,7 +522,7 @@ def search_keyword(user_msg):
     return fallback_results[:5]
 
 
-def search_vector_chunks(user_msg, n_results=4):
+def search_vector_chunks(user_msg, n_results=6):
     """Vektör aramayı parça düzeyinde yaparak daha doğru bağlam döndürür."""
     query_vector = get_embedding(user_msg, is_query=True)
     if not query_vector:
@@ -532,8 +555,14 @@ def search_vector_chunks(user_msg, n_results=4):
     return chunks
 
 
+MIN_STRONG_KEYWORD_SCORE = 1.6
+
+
 def should_use_vector_search(pg_results, intent):
-    """Keyword sonucu zayıfsa semantik aramayı ek bağlam olarak devreye alır."""
+    """Keyword sonucu yeterince güçlüyse vektör aramasını atlar; aksi halde semantik
+    aramayı ek bağlam olarak devreye alır."""
+    # Konum/iletişim/ulaşım gibi katı intent'lerde keyword ve önceliklendirme zaten
+    # doğru sayfayı buluyor; vektör arama ek değer üretmiyor, hatta gürültü ekliyor.
     if intent["is_location"] or intent["is_contact"] or intent["is_transport"]:
         return False
 
@@ -541,20 +570,21 @@ def should_use_vector_search(pg_results, intent):
         return True
 
     top_result = pg_results[0]
-    top_score = getattr(top_result, "match_score", 0)
-    strong_title_match = getattr(top_result, "title_hit_count", 0) >= 2
+    top_score = float(getattr(top_result, "match_score", 0))
+    strong_title_match = int(getattr(top_result, "title_hit_count", 0)) >= 2
 
     if strong_title_match and top_score >= MIN_STRONG_KEYWORD_SCORE:
         return False
 
+    # Tek bir zayıf sonuç varsa ya da skor düşükse vektör takviyesi al.
     return len(pg_results) < 2 or top_score < MIN_STRONG_KEYWORD_SCORE
 
 
 def search_context(user_msg):
-    """Hybrid arama: hızlı keyword arama + gerektiğinde parça bazlı vektör arar."""
+    """Hybrid arama: keyword/intent araması + zayıf eşleşmelerde vektör takviyesi."""
     pg_results = search_keyword(user_msg)
     intent = detect_query_intent(user_msg)
-    vector_results = search_vector_chunks(user_msg, n_results=5) if should_use_vector_search(pg_results, intent) else []
+    vector_results = search_vector_chunks(user_msg) if should_use_vector_search(pg_results, intent) else []
 
     return pg_results, vector_results
 
@@ -594,7 +624,7 @@ def build_context(keyword_entries, vector_chunks, user_msg, context_query=None):
             continue
 
         distance = chunk.get("distance")
-        if distance is not None and distance > VECTOR_DISTANCE_LIMIT:
+        if distance is not None and distance > 1.4:
             continue
 
         if context_extractor:
@@ -628,137 +658,211 @@ def build_extra_note(intent):
 
 
 def get_simple_chat_reply(user_msg):
-    """Selamlama ve teşekkür gibi basit sohbetleri model çağırmadan yanıtla."""
-    text = (user_msg or "").lower()
+    """Selamlama / teşekkür gibi nezaket mesajlarını model çağırmadan yanıtlar."""
+    text = (user_msg or "").lower().strip()
+    if not text:
+        return None
 
-    if "teşekkür" in text or "tesekkur" in text or "sağ ol" in text or "sag ol" in text:
+    if any(t in text for t in ("teşekkür", "tesekkur", "sağ ol", "sag ol", "eyvallah")):
         return "Rica ederim."
 
     if "nasılsın" in text or "nasilsin" in text:
         return "İyiyim, teşekkür ederim. Size nasıl yardımcı olabilirim?"
 
-    if "merhaba" in text or "selam" in text or text.strip() == "hey":
-        return "Merhaba, nasıl yardımcı olabilirim?"
+    if any(t in text for t in ("merhaba", "selam", "selamün", "selamun")) or text in ("hi", "hey", "hello"):
+        return "Merhaba, size nasıl yardımcı olabilirim?"
 
-    if text.strip() in {"iyiyim", "iyi"}:
-        return "Harika. Size nasıl yardımcı olabilirim?"
+    if text in ("iyiyim", "iyi", "ok", "tamam"):
+        return "Harika. Bir konuda yardımcı olmamı ister misiniz?"
 
     return None
 
 
 @csrf_exempt
 def chat_api(request):
-    """Kullanıcı mesajını işler, uygun RAG bağlamını kurar ve AI yanıtını JSON olarak döner."""
-    if request.method == "POST":
-        try:
-            data = json.loads(request.body)
-        except json.JSONDecodeError:
-            return JsonResponse({"reply": "Geçersiz istek verisi gönderildi."}, status=400)
+    """Kullanıcı mesajını işler ve AI yanıtını parça parça (streaming) döner."""
+    if request.method != "POST":
+        return JsonResponse({"reply": "Yalnızca POST destekleniyor."}, status=405)
 
-        user_msg = (data.get("message") or "").strip()
-        if not user_msg:
-            return JsonResponse({"reply": "Lütfen bir mesaj yazın."}, status=400)
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"reply": "Geçersiz istek verisi gönderildi."}, status=400)
 
-        recent_history = list(get_message_queryset(request).order_by("-id")[:4])
-        recent_history.reverse()
+    user_msg = (data.get("message") or "").strip()
+    if not user_msg:
+        return JsonResponse({"reply": "Lütfen bir mesaj yazın."}, status=400)
 
-        is_chat_msg = any(kw in user_msg.lower() for kw in CHAT_KEYWORDS)
-        simple_chat_reply = get_simple_chat_reply(user_msg) if is_chat_msg else None
-        if simple_chat_reply:
-            if request.user.is_authenticated:
+    recent_history = list(get_message_queryset(request).order_by("-id")[:4])
+    recent_history.reverse()
+
+    is_chat_msg = any(kw in user_msg.lower() for kw in CHAT_KEYWORDS)
+
+    # Nezaket mesajları için sabit cevabı tek-parça stream et — model çağrısı yok.
+    # CHAT_KEYWORDS'ten bağımsız: kısa selamlama varyantları (örn. 'iyi') de yakalansın.
+    simple_chat_reply = get_simple_chat_reply(user_msg)
+    if simple_chat_reply:
+        if request.user.is_authenticated:
+            try:
                 ChatMessage.objects.create(
                     user=request.user,
                     user_query=user_msg,
                     ai_response=simple_chat_reply,
                 )
-            return JsonResponse({"reply": simple_chat_reply})
-
-        search_query = user_msg
-        if not is_chat_msg and len(user_msg.split()) < 3 and recent_history:
-            last_user_query = recent_history[-1].user_query
-            search_query = f"{last_user_query} {user_msg}"
-
-        intent = detect_query_intent(user_msg)
-
-        if is_chat_msg:
-            keyword_entries = []
-            vector_chunks = []
-            context_text = ""
-        else:
-            try:
-                keyword_entries, vector_chunks = search_context(search_query)
-                context_text = build_context(keyword_entries, vector_chunks, user_msg, context_query=search_query)
             except Exception as e:
-                print(f"RAG Error: {e}")
-                keyword_entries = []
-                vector_chunks = []
-                context_text = ""
+                print(f"DB save error: {e}")
 
-        if is_chat_msg:
-            user_content = (
-                f"--- KULLANICI MESAJI ---\n{user_msg}\n\n"
-                f"(Sistem Notu: Bu sadece bir nezaket/sohbet mesajı. Kendini tanıtmana gerek yok. "
-                f"Teşekkürse sadece 'Rica ederim', selamsa sadece 'Sizi dinliyorum / Nasıl yardımcı olabilirim?' gibi çok kısa, doğal bir cevap ver.)"
-            )
-        elif context_text:
-            extra_note = build_extra_note(intent)
-            note_suffix = f"\n\n(Sistem Notu: {extra_note})" if extra_note else ""
-            user_content = (
-                f"--- BAĞLAM BİLGİSİ ---\n{context_text}\n\n"
-                f"--- KULLANICI MESAJI ---\n{user_msg}"
-                f"{note_suffix}"
-            )
-        else:
-            user_content = (
-                f"--- KULLANICI MESAJI ---\n{user_msg}\n\n"
-                f"(Sistem Notu: Bu bir üniversite sorusu ancak veritabanında hiçbir bilgi yok. "
-                f"SADECE 'Bu konuda elimde yeterli bilgi bulunmuyor.' de ve konuyu kapat.)"
-            )
+        def quick_reply():
+            yield simple_chat_reply
 
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        for chat in recent_history[-2:]:
-            messages.append({"role": "user", "content": chat.user_query})
-            messages.append({"role": "assistant", "content": chat.ai_response})
-        messages.append({"role": "user", "content": user_content})
+        response = StreamingHttpResponse(quick_reply(), content_type="text/plain; charset=utf-8")
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
+        return response
 
-        print("\n" + "=" * 50)
-        print("💡 RAG BAĞLAM:")
-        print(context_text[:200] + "..." if len(context_text) > 200 else context_text)
-        print("=" * 50 + "\n")
+    search_query = user_msg
+    if not is_chat_msg and len(user_msg.split()) < 3 and recent_history:
+        search_query = f"{recent_history[-1].user_query} {user_msg}"
 
+    intent = detect_query_intent(user_msg)
+
+    if is_chat_msg:
+        context_text = ""
+    else:
         try:
-            response = requests.post(
+            keyword_entries, vector_chunks = search_context(search_query)
+            context_text = build_context(keyword_entries, vector_chunks, user_msg, context_query=search_query)
+        except Exception as e:
+            print(f"RAG Error: {e}")
+            context_text = ""
+
+    if is_chat_msg:
+        user_content = (
+            f"--- KULLANICI MESAJI ---\n{user_msg}\n\n"
+            f"(Sistem Notu: Sadece nezaket mesajı. Tek kısa cümleyle karşılık ver, kendini tanıtma.)"
+        )
+        options = CHAT_OLLAMA_OPTIONS
+    elif context_text:
+        extra_note = build_extra_note(intent)
+        note_suffix = f"\n\n(Sistem Notu: {extra_note})" if extra_note else ""
+        user_content = (
+            f"--- BAĞLAM BİLGİSİ ---\n{context_text}\n\n"
+            f"--- KULLANICI MESAJI ---\n{user_msg}"
+            f"{note_suffix}"
+        )
+        options = OLLAMA_OPTIONS
+    else:
+        user_content = (
+            f"--- KULLANICI MESAJI ---\n{user_msg}\n\n"
+            f"(Sistem Notu: Bağlam yok. SADECE 'Bu konuda elimde yeterli bilgi bulunmuyor.' de.)"
+        )
+        options = CHAT_OLLAMA_OPTIONS
+
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for chat in recent_history[-2:]:
+        messages.append({"role": "user", "content": chat.user_query})
+        messages.append({"role": "assistant", "content": chat.ai_response})
+    messages.append({"role": "user", "content": user_content})
+
+    save_user = request.user if request.user.is_authenticated else None
+
+    def stream_reply():
+        collected = []
+        try:
+            with requests.post(
                 OLLAMA_URL,
                 json={
                     "model": MODEL_NAME,
                     "messages": messages,
-                    "stream": False,
-                    "options": OLLAMA_OPTIONS,
+                    "stream": True,
+                    "keep_alive": OLLAMA_KEEP_ALIVE,
+                    "options": options,
                 },
+                stream=True,
                 timeout=300,
-            )
+            ) as response:
+                # İlk N karakterlik tampon: model yanlışlıkla 'Sevgili...', 'Sayın...' gibi
+                # hitapla başlarsa o satırı atıp gerçek cevaba geçmek için biriktiriyoruz.
+                buffer = ""
+                opening_cleaned = False
+                BAD_OPENINGS = ("sevgili", "sayın", "sayin", "değerli", "degerli")
 
-            response_json = response.json()
-            print("\n" + "=" * 50)
-            print(f"DEBUG - OLLAMA YANITI: {response_json}")
-            print("=" * 50 + "\n")
+                def clean_opening(text):
+                    """Hitapla başlayan cevabın ilk satırını/cümlesini atar."""
+                    lower = text.lstrip().lower()
+                    if not any(lower.startswith(o) for o in BAD_OPENINGS):
+                        return text
+                    stripped = text.lstrip()
+                    cut_idx = -1
+                    for sep in ("\n\n", "\n", ", "):
+                        idx = stripped.find(sep)
+                        if idx > 0 and (cut_idx == -1 or idx < cut_idx):
+                            cut_idx = idx + len(sep)
+                    if cut_idx > 0:
+                        rest = stripped[cut_idx:].lstrip()
+                        return rest if rest else text
+                    return text
 
-            if "error" in response_json:
-                ai_reply = f"Ollama Hatası: {response_json['error']}"
-            else:
-                ai_reply = response_json.get("message", {}).get("content", "").strip()
+                for raw_line in response.iter_lines(decode_unicode=True):
+                    if not raw_line:
+                        continue
+                    try:
+                        chunk = json.loads(raw_line)
+                    except json.JSONDecodeError:
+                        continue
 
+                    if "error" in chunk:
+                        err = f"Ollama Hatası: {chunk['error']}"
+                        yield err
+                        collected.append(err)
+                        break
+
+                    piece = chunk.get("message", {}).get("content", "")
+                    if piece:
+                        if not opening_cleaned:
+                            buffer += piece
+                            # 80 karakter veya satır sonu görene kadar bekle.
+                            if len(buffer) < 80 and "\n" not in buffer and "," not in buffer:
+                                if not chunk.get("done"):
+                                    continue
+                            cleaned = clean_opening(buffer)
+                            opening_cleaned = True
+                            collected.append(cleaned)
+                            yield cleaned
+                        else:
+                            collected.append(piece)
+                            yield piece
+
+                    if chunk.get("done"):
+                        # Eğer stream çok kısaysa buffer'ı boşalt.
+                        if not opening_cleaned and buffer:
+                            cleaned = clean_opening(buffer)
+                            collected.append(cleaned)
+                            yield cleaned
+                            opening_cleaned = True
+                        break
         except Exception as e:
             print(f"AI Error: {e}")
-            ai_reply = "Yapay zeka servisi şu anda kullanılamıyor. Lütfen daha sonra tekrar deneyin."
+            fallback = "Yapay zeka servisi şu anda kullanılamıyor. Lütfen daha sonra tekrar deneyin."
+            yield fallback
+            collected.append(fallback)
+        finally:
+            if save_user is not None:
+                ai_reply = "".join(collected).strip()
+                if ai_reply:
+                    try:
+                        ChatMessage.objects.create(
+                            user=save_user,
+                            user_query=user_msg,
+                            ai_response=ai_reply,
+                        )
+                    except Exception as e:
+                        print(f"DB save error: {e}")
 
-        if request.user.is_authenticated:
-            ChatMessage.objects.create(
-                user=request.user,
-                user_query=user_msg,
-                ai_response=ai_reply,
-            )
-        return JsonResponse({"reply": ai_reply})
+    response = StreamingHttpResponse(stream_reply(), content_type="text/plain; charset=utf-8")
+    response["Cache-Control"] = "no-cache"
+    response["X-Accel-Buffering"] = "no"
+    return response
 
 
 def fallback_title_from_question(question):
@@ -774,13 +878,29 @@ def clean_generated_title(title, question):
     """AI'dan gelen başlığı temizler; geçersizse soru tabanlı başlığa döner."""
     title = re.sub(r"\s+", " ", title or "").strip()
     title = title.strip("\"'`“”‘’ ")
-    title = re.sub(r"^(başlık|baslik|title)\s*:\s*", "", title, flags=re.IGNORECASE).strip()
+    title = re.sub(r"^(başlık|baslik|title|konu)\s*[:\-]\s*", "", title, flags=re.IGNORECASE).strip()
     title = title.splitlines()[0].strip(" -•\t") if title else ""
+    title = title.strip("\"'`“”‘’ ")
+    title = re.sub(r"^(merhaba|selam|hi|hello)[\s,!.\-:]+", "", title, flags=re.IGNORECASE).strip()
 
     if not title or len(title) < 3:
         return fallback_title_from_question(question)
 
     return title[:TITLE_MAX_LENGTH].strip()
+
+
+def is_greeting_question(text):
+    """Kısa selamlama/teşekkür mesajlarını tespit eder; başlık üretirken Ollama'ya
+    gitmemek için kullanılır."""
+    if not text:
+        return True
+    cleaned = re.sub(r"[^\w\s]", " ", text.lower(), flags=re.UNICODE).strip()
+    if not cleaned:
+        return True
+    tokens = cleaned.split()
+    if len(tokens) > 4:
+        return False
+    return any(token in CHAT_KEYWORDS for token in tokens)
 
 
 @csrf_exempt
@@ -793,6 +913,10 @@ def generate_title(request):
             return JsonResponse({"title": "Yeni Sohbet"}, status=400)
 
         question = data.get("question", "")
+
+        if is_greeting_question(question):
+            return JsonResponse({"title": "Genel Sohbet"})
+
         title = fallback_title_from_question(question)
 
         try:
@@ -801,11 +925,25 @@ def generate_title(request):
                 json={
                     "model": MODEL_NAME,
                     "messages": [
-                        {"role": "system", "content": "Verilen soruya dayanarak çok kısa bir sohbet başlığı oluştur. En fazla 4-5 kelime. Türkçe yaz. Sadece başlığı yaz."},
-                        {"role": "user", "content": question},
+                        {
+                            "role": "system",
+                            "content": (
+                                "Kullanıcının mesajının ANA KONUSUNU yansıtan kısa bir sohbet başlığı üret. "
+                                "Kurallar: en fazla 4 kelime, Türkçe, baş harfler büyük (Title Case), "
+                                "tırnak/noktalama YOK, 'Merhaba'/'Selam' ile başlama, "
+                                "'Sohbet'/'Soru'/'Hakkında' kelimelerini kullanma. "
+                                "Sadece başlığı yaz, başka bir şey yazma.\n\n"
+                                "Örnekler:\n"
+                                "Soru: Burs imkanlari nelerdir? -> Burs İmkânları\n"
+                                "Soru: Tıp fakültesi kaç yıl? -> Tıp Fakültesi Süresi\n"
+                                "Soru: Kampüse nasıl ulaşırım? -> Kampüse Ulaşım"
+                            ),
+                        },
+                        {"role": "user", "content": f"Soru: {question}"},
                     ],
                     "stream": False,
-                    "options": {"temperature": 0.5, "num_ctx": 512, "num_predict": 20},
+                    "keep_alive": OLLAMA_KEEP_ALIVE,
+                    "options": {"temperature": 0.2, "top_p": 0.8, "num_ctx": 512, "num_predict": 20},
                 },
                 timeout=60,
             )

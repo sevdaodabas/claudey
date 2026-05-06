@@ -3,7 +3,7 @@ services:
     build: ./claudey
     container_name: acu_chat_app
     ports:
-      - "8000:8000"
+      - "8500:8000"
     volumes:
       - ./claudey:/app
     env_file:
