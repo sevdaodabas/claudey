@@ -1,24 +1,24 @@
 #!/bin/bash
 
-# Start Ollama server in background
+# Ollama sunucusunu arka planda başlat
 ollama serve &
 
-# Wait for Ollama server to be ready
-echo "Waiting for Ollama server..."
+# Ollama sunucusu hazır olana kadar bekle
+echo "Ollama sunucusu bekleniyor..."
 until ollama list > /dev/null 2>&1; do
   sleep 2
 done
-echo "Ollama server is ready."
+echo "Ollama sunucusu hazır."
 
-# Pull the Qwen2.5 model if not already downloaded
-echo "Pulling Qwen2.5-7B-Instruct model..."
-ollama pull qwen2.5:7b
-echo "Model is ready."
+# Qwen2.5 modeli indirilmediyse indir
+echo "Qwen2.5 modeli indiriliyor..."
+ollama pull qwen2.5:3b
+echo "Model hazır."
 
-# Pull the embedding model for ChromaDB
-echo "Pulling Nomic Embedding model..."
+# ChromaDB için embedding modelini indir
+echo "Nomic Embedding modeli indiriliyor..."
 ollama pull nomic-embed-text
-echo "Embedding model is ready."
+echo "Embedding modeli hazır."
 
-# Keep container running
+# Container'ı çalışır durumda tut
 wait

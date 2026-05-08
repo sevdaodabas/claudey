@@ -60,6 +60,16 @@ CHAT_OLLAMA_OPTIONS = {
 TITLE_MAX_LENGTH = 50
 VECTOR_DISTANCE_LIMIT = 1.2
 MIN_STRONG_KEYWORD_SCORE = 1.6
+TITLE_INTENT_FORBIDDEN_TERMS = {
+    "location": (
+        "ücret", "ucret", "fiyat", "burs", "indirim", "başvuru", "basvuru",
+        "kayıt", "kayit", "kontenjan", "puan",
+    ),
+    "fee": (
+        "konum", "adres", "ulaşım", "ulasim", "nerede", "iletişim", "iletisim",
+        "telefon", "mail", "e-posta", "eposta",
+    ),
+}
 FEE_HINTS = ("ücret", "ucret", "fiyat", "öğrenim ücreti", "ogrenim ucreti")
 SCHOLARSHIP_HINTS = ("burs", "indirim")
 
@@ -871,7 +881,32 @@ def fallback_title_from_question(question):
     title = title.strip("\"'`“”‘’.,!?;:-")
     if not title:
         return "Yeni Sohbet"
-    return title[:TITLE_MAX_LENGTH].strip()
+    return truncate_title_at_word(title)
+
+
+def truncate_title_at_word(title, max_length=TITLE_MAX_LENGTH):
+    """Başlığı kelime ortasında kesmeden kısaltır."""
+    title = re.sub(r"\s+", " ", title or "").strip()
+    if len(title) <= max_length:
+        return title
+
+    shortened = title[:max_length + 1]
+    cut_point = shortened.rfind(" ")
+    if cut_point > 12:
+        return shortened[:cut_point].strip()
+    return title[:max_length].strip()
+
+
+def generated_title_conflicts_with_question(title, question):
+    """AI başlığı soru niyetiyle açıkça çelişiyorsa reddeder."""
+    intent = detect_query_intent(question)
+    normalized_title = (title or "").lower()
+
+    if intent["is_location"] or intent["is_transport"]:
+        return any(term in normalized_title for term in TITLE_INTENT_FORBIDDEN_TERMS["location"])
+    if intent["is_fee"]:
+        return any(term in normalized_title for term in TITLE_INTENT_FORBIDDEN_TERMS["fee"])
+    return False
 
 
 def clean_generated_title(title, question):
@@ -885,8 +920,10 @@ def clean_generated_title(title, question):
 
     if not title or len(title) < 3:
         return fallback_title_from_question(question)
+    if generated_title_conflicts_with_question(title, question):
+        return fallback_title_from_question(question)
 
-    return title[:TITLE_MAX_LENGTH].strip()
+    return truncate_title_at_word(title)
 
 
 def is_greeting_question(text):
