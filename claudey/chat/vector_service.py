@@ -11,10 +11,37 @@ EMBED_MODEL = "nomic-embed-text"
 CHUNK_SIZE = 900
 CHUNK_OVERLAP = 180
 
-chroma_client = chromadb.PersistentClient(path="./chroma_db_data",
-                                          settings=Settings(anonymized_telemetry=False))
-collection = chroma_client.get_or_create_collection(name="university_docs")
 session = requests.Session()
+
+
+class LazyChromaCollection:
+    """ChromaDB koleksiyonunu ilk gerçek kullanımda açar.
+
+    Django startup sırasında signal import'ları bu modülü yüklediği için ChromaDB
+    import anında açılırsa migrate/showmigrations gibi DB komutları da eski veya
+    bozuk vektör indeksi yüzünden çalışamayabilir.
+    """
+
+    def __init__(self):
+        self._client = None
+        self._collection = None
+
+    def _load(self):
+        if self._collection is None:
+            self._client = chromadb.PersistentClient(
+                path="./chroma_db_data",
+                settings=Settings(anonymized_telemetry=False),
+            )
+            self._collection = self._client.get_or_create_collection(
+                name="university_docs"
+            )
+        return self._collection
+
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+
+collection = LazyChromaCollection()
 
 
 def compute_content_hash(title, content):
@@ -95,8 +122,8 @@ def get_embedding(text, is_query=False):
 # --- Indexing API ---------------------------------------------------------
 #
 # Bu yardımcılar UniversityData kayıtlarını ChromaDB'ye yazmak/silmek/yeniden
-# inşa etmek için kullanılır. Scraper'lar her kayıt sonrası `index_entry`
-# çağırır; toplu reindex_vectors komutu da `reindex_all` kullanır.
+# İnşa etmek için kullanılır. Scraper'lar her kayıt sonrası `index_entry` çağırır
+# Toplu reindex_vectors komutu da `reindex_all` kullanır.
 
 def delete_entry_vectors(entry_id):
     """Bir UniversityData kaydının ChromaDB'deki tüm chunk'larını siler."""
