@@ -5,7 +5,7 @@ import requests
 from django.contrib.postgres.search import SearchQuery, SearchRank, SearchVector
 from django.http import JsonResponse, StreamingHttpResponse
 from django.shortcuts import render
-from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.csrf import ensure_csrf_cookie
 
 from .models import ChatMessage
 from .rag_config import (
@@ -688,7 +688,6 @@ def get_simple_chat_reply(user_msg):
     return None
 
 
-@csrf_exempt
 def chat_api(request):
     """Kullanıcı mesajını işler ve AI yanıtını parça parça (streaming) döner."""
     if request.method != "POST":
@@ -940,7 +939,6 @@ def is_greeting_question(text):
     return any(token in CHAT_KEYWORDS for token in tokens)
 
 
-@csrf_exempt
 def generate_title(request):
     """Verilen soru için kısa bir sohbet başlığı üretip JSON olarak döner."""
     if request.method == "POST":
@@ -992,6 +990,7 @@ def generate_title(request):
         return JsonResponse({"title": title})
 
 
+@ensure_csrf_cookie
 def home(request):
     stored_messages = []
     if request.user.is_authenticated:
