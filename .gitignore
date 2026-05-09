@@ -14,3 +14,4 @@ chroma_db_data/
 
 __pycache__/
 *.pyc
+.ruff_cache/
