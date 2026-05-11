@@ -70,9 +70,6 @@ TITLE_INTENT_FORBIDDEN_TERMS = {
         "telefon", "mail", "e-posta", "eposta",
     ),
 }
-FEE_HINTS = ("ücret", "ucret", "fiyat", "öğrenim ücreti", "ogrenim ucreti")
-SCHOLARSHIP_HINTS = ("burs", "indirim")
-
 # Ücret / burs sorularını ayırt etmek için ipuçları.
 FEE_HINTS = ("ücret", "ucret", "fiyat", "öğrenim ücreti", "ogrenim ucreti", "ne kadar")
 SCHOLARSHIP_HINTS = ("burs", "indirim", "destek")

@@ -4,7 +4,10 @@ from django.urls import reverse
 
 
 class RegisterViewTests(TestCase):
+    """Kayıt ekranının form gösterme, kullanıcı oluşturma ve hata davranışını test eder."""
+
     def test_register_get_renders_form(self):
+        # GET isteği kayıt formunu CSRF korumasıyla birlikte göstermelidir.
         response = self.client.get(reverse("register"))
 
         self.assertEqual(response.status_code, 200)
@@ -12,6 +15,7 @@ class RegisterViewTests(TestCase):
         self.assertIn("form", response.context)
 
     def test_register_post_creates_and_logs_in_user(self):
+        # Geçerli form gönderimi kullanıcıyı oluşturup ana sayfaya giriş yapmış halde yönlendirir.
         response = self.client.post(
             reverse("register"),
             data={
@@ -27,6 +31,7 @@ class RegisterViewTests(TestCase):
         self.assertIn("_auth_user_id", self.client.session)
 
     def test_register_post_with_invalid_data_does_not_create_user(self):
+        # Geçersiz form kullanıcı oluşturmaz; form hatalarıyla aynı sayfayı döndürür.
         response = self.client.post(
             reverse("register"),
             data={

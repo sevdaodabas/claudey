@@ -172,6 +172,7 @@ Run tests for a specific app:
 
 ```bash
 docker exec acu_chat_app python manage.py test chat
+docker exec acu_chat_app python manage.py test scraper
 docker exec acu_chat_app python manage.py test users
 ```
 
@@ -181,7 +182,7 @@ Run with more detailed output:
 docker exec acu_chat_app python manage.py test --verbosity 2
 ```
 
-Current test coverage includes vector-service helpers, chat helper logic, chat API validation, streaming quick replies, title generation fallback behavior, keyword scoring, context deduplication, and registration flows. External Ollama calls are mocked where needed, so the unit tests do not require a live model response.
+Current test coverage includes vector-service helpers, chat helper logic, chat API validation, streaming quick replies and edge cases, RAG context/no-context payloads, authenticated history, guest persistence behavior, title generation prompts and fallback behavior, keyword scoring, fee-result prioritization, context deduplication, scraper parsing/update helpers, reindex command options, frontend template hooks, and registration flows. External Ollama, ChromaDB, and scraper HTTP calls are mocked where needed, so the unit tests do not require a live model response.
 
 ## Vector Index Management
 
