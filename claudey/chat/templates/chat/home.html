@@ -478,7 +478,11 @@
             'Content-Type': 'application/json',
             'X-CSRFToken': csrfToken
           },
-          body: JSON.stringify({ message: message })
+          body: JSON.stringify({
+            message: message,
+            conversation_id: currentChatId,
+            history: chat.messages.slice(-8)
+          })
         });
 
         if (!response.ok || !response.body) {

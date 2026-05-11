@@ -1,6 +1,6 @@
 # Claudey
 
-Claudey is a Turkish RAG chat assistant for Acibadem University. It answers questions about the university by combining data scraped from the official website and Bologna information system with PostgreSQL full-text search, ChromaDB vector search, and an Ollama-hosted **Qwen2.5-3B** model.
+Claudey is a Turkish RAG chat assistant for Acibadem University. It answers questions about the university by combining data scraped from the official website and Bologna information system with PostgreSQL full-text search, ChromaDB vector search, and an Ollama-hosted **Qwen2.5-7B** model.
 
 The app is built with Django and runs through Docker Compose. The main chat endpoint streams tokens to the browser as soon as Ollama produces them, while simple greetings and thanks are answered instantly without calling the model.
 
@@ -10,11 +10,10 @@ The app is built with Django and runs through Docker Compose. The main chat endp
 - **Fast small-talk path:** greetings such as `merhaba`, `selam`, `tesekkurler`, `nasilsin`, and `tamam` return fixed replies without an LLM call.
 - **Hybrid retrieval:** intent detection, PostgreSQL full-text search, intent-aware scoring, and ChromaDB fallback for weak keyword matches.
 - **Smart context trimming:** long pages are trimmed around query terms while table-like content such as tuition and quota rows is preserved.
-- **Tuition intent handling:** fee questions prioritize tuition pages and avoid letting generic scholarship pages outrank actual tuition data.
 - **LLM profiles:** information answers use a larger context profile (`num_ctx=3072`, `num_predict=700`) and `keep_alive=30m`.
 - **Defensive output cleanup:** accidental opening salutations such as "Sevgili..." or "Sayin..." are removed from the stream.
 - **University-name guardrail:** the system prompt keeps answers tied to Acibadem University.
-- **Authenticated chat history:** signed-in users get persisted `ChatMessage` history; guests use browser `localStorage`.
+- **Conversation-scoped chat history:** the frontend sends the active conversation id and recent active-chat history; signed-in users get persisted `ChatMessage` history per conversation, while guests use browser `localStorage`.
 - **Polished vanilla UI:** animated message bubbles, active-chat highlighting, dark theme styling, and streaming-aware message rendering.
 
 ## Architecture
@@ -25,7 +24,7 @@ The app is built with Django and runs through Docker Compose. The main chat endp
 │                                                            │
 │  ┌────────────┐   ┌────────────┐   ┌────────────────────┐  │
 │  │  Django    │   │ PostgreSQL │   │ Ollama (claudey_ai)│  │
-│  │  (web)     │──▶│   (db)     │   │  Qwen2.5-3B        │  │
+│  │  (web)     │──▶│   (db)     │   │  Qwen2.5-7B        │  │
 │  │  :8000     │   │   :5432    │◀──│  :11434            │  │
 │  │            │   │            │   │                    │  │
 │  │ Chat API ──┼───┼─ FTS search│   │ /api/chat stream   │  │
@@ -52,7 +51,7 @@ Host ports:
 ## Requirements
 
 - Docker Desktop or Docker Engine with Docker Compose v2
-- At least 4 GB free RAM for Qwen2.5-3B and the embedding model
+- At least 8 GB free RAM for Qwen2.5-7B and the embedding model
 - Internet access on first startup to download the Ollama models
 
 ## Setup
@@ -182,7 +181,7 @@ Run with more detailed output:
 docker exec acu_chat_app python manage.py test --verbosity 2
 ```
 
-Current test coverage includes vector-service helpers, chat helper logic, chat API validation, streaming quick replies and edge cases, RAG context/no-context payloads, authenticated history, guest persistence behavior, title generation prompts and fallback behavior, keyword scoring, fee-result prioritization, context deduplication, scraper parsing/update helpers, reindex command options, frontend template hooks, and registration flows. External Ollama, ChromaDB, and scraper HTTP calls are mocked where needed, so the unit tests do not require a live model response.
+Current test coverage includes vector-service helpers, chat helper logic, chat API validation, streaming quick replies and edge cases, RAG context/no-context payloads, conversation-scoped authenticated history, guest persistence behavior, title generation prompts and fallback behavior, keyword scoring, fee-result prioritization, academic staff retrieval guardrails, context deduplication, scraper parsing/update helpers, reindex command options, frontend template hooks, and registration flows. External Ollama, ChromaDB, and scraper HTTP calls are mocked where needed, so the unit tests do not require a live model response.
 
 ## Vector Index Management
 
@@ -252,14 +251,15 @@ Python code changes under `claudey/` are mounted into the container and are norm
 When a message reaches `chat_api`, Claudey runs this pipeline:
 
 1. `get_simple_chat_reply` handles greetings and thanks without calling Ollama.
-2. `detect_query_intent` identifies location, contact, transport, admission, program, life, fee, and scholarship signals.
-3. Intent-specific filters narrow likely PostgreSQL records.
-4. PostgreSQL full-text search ranks candidates with weighted title and content fields.
-5. `score_entry_for_intent` refines ordering using URL, title, and content patterns.
-6. `should_use_vector_search` decides whether ChromaDB fallback is needed.
-7. `build_context` assembles up to four context blocks and deduplicates keyword and vector matches from the same page.
-8. The context, user question, and intent-specific notes are sent to Ollama with streaming enabled.
-9. The response stream is cleaned, yielded to the browser, and saved for authenticated users.
+2. The active frontend conversation id and recent active-chat history scope the prompt history so separate sidebar conversations do not leak into each other.
+3. `detect_query_intent` identifies location, contact, transport, admission, program, life, fee, scholarship, and academic-staff signals.
+4. Intent-specific filters narrow likely PostgreSQL records.
+5. PostgreSQL full-text search ranks candidates with weighted title and content fields.
+6. `score_entry_for_intent` refines ordering using URL, title, and content patterns.
+7. `should_use_vector_search` decides whether ChromaDB fallback is needed; academic-staff questions skip vector fallback to avoid unrelated faculty staff lists.
+8. `build_context` assembles up to four context blocks and deduplicates keyword and vector matches from the same page. For academic-staff questions, staff pages without visible names/titles are not used as answer context.
+9. The context, user question, and intent-specific notes are sent to Ollama with streaming enabled.
+10. The response stream is cleaned, yielded to the browser, and saved for authenticated users.
 
 ## API Endpoints
 
@@ -277,7 +277,18 @@ Example chat request:
 
 ```json
 {
-  "message": "Burs imkanlari nelerdir?"
+  "message": "Burs imkanlari nelerdir?",
+  "conversation_id": "chat_1778534198643",
+  "history": [
+    {
+      "text": "Merhaba",
+      "sender": "user"
+    },
+    {
+      "text": "Merhaba, size nasıl yardımcı olabilirim?",
+      "sender": "bot"
+    }
+  ]
 }
 ```
 
@@ -317,6 +328,7 @@ Example title response:
 | Field | Type | Description |
 | --- | --- | --- |
 | `user` | ForeignKey | Owner of the message |
+| `session_key` | CharField | Frontend conversation id used to scope persisted chat history |
 | `user_query` | TextField | User question |
 | `ai_response` | TextField | Full assistant response |
 | `timestamp` | DateTimeField | Message timestamp |
@@ -373,7 +385,7 @@ claudey/
 - **Database:** PostgreSQL 15 full-text search
 - **Vector store:** ChromaDB
 - **LLM runtime:** Ollama
-- **Models:** `qwen2.5:3b`, `nomic-embed-text`
+- **Models:** `qwen2.5:7b`, `nomic-embed-text`
 - **Scraping:** BeautifulSoup4, lxml, Requests
 - **Frontend:** Vanilla HTML, CSS, JavaScript, `ReadableStream`
 - **Runtime:** Docker Compose

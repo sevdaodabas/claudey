@@ -264,6 +264,8 @@ class ChatViewTests(TestCase):
         self.assertIn("new TextDecoder('utf-8')", html)
         self.assertIn("localStorage.setItem(storageKey", html)
         self.assertIn("fetch('/generate-title/'", html)
+        self.assertIn("conversation_id: currentChatId", html)
+        self.assertIn("history: chat.messages.slice(-8)", html)
 
     @patch("chat.views.requests.post")
     @patch("chat.views.search_context")
@@ -397,6 +399,111 @@ class ChatViewTests(TestCase):
 
         self.assertIn("Burs var mı?", contents)
         self.assertIn("Burs bilgisi vardır.", contents)
+
+    @patch("chat.views.requests.post")
+    @patch("chat.views.search_context", return_value=([], []))
+    def test_chat_api_scopes_recent_history_to_active_conversation(
+        self,
+        _mock_search_context,
+        mock_post,
+    ):
+        # Sol menüdeki farklı sohbetlerin geçmişi aktif sohbet prompt'una karışmamalıdır.
+        user = get_user_model().objects.create_user(
+            username="conversation-user",
+            password="strong-test-password",
+        )
+        views.ChatMessage.objects.create(
+            user=user,
+            session_key="chat_program",
+            user_query="Bilgisayar mühendisliği hakkında bilgi alabilir miyim?",
+            ai_response="Bilgisayar mühendisliği programı bilgisi.",
+        )
+        views.ChatMessage.objects.create(
+            user=user,
+            session_key="chat_psikoloji",
+            user_query="Psikoloji bölümü hakkında bilgi alabilir miyim?",
+            ai_response="Psikoloji bölümü bilgisi.",
+        )
+        self.client.force_login(user)
+        mock_post.return_value = MockOllamaStream(
+            [json.dumps({"message": {"content": "Yeni yanıt"}, "done": True})]
+        )
+
+        response = self.client.post(
+            reverse("chat_api"),
+            data=json.dumps(
+                {
+                    "message": "Psikoloji bölümü hakkında bilgi alabilir miyim?",
+                    "conversation_id": "chat_psikoloji",
+                }
+            ),
+            content_type="application/json",
+        )
+
+        b"".join(response.streaming_content)
+        payload_messages = mock_post.call_args.kwargs["json"]["messages"]
+        contents = [message["content"] for message in payload_messages]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Psikoloji bölümü bilgisi.", contents)
+        self.assertNotIn("Bilgisayar mühendisliği programı bilgisi.", contents)
+        self.assertTrue(
+            user.chat_messages.filter(
+                session_key="chat_psikoloji",
+                user_query="Psikoloji bölümü hakkında bilgi alabilir miyim?",
+                ai_response="Yeni yanıt",
+            ).exists()
+        )
+
+    @patch("chat.views.requests.post")
+    @patch("chat.views.search_context", return_value=([], []))
+    def test_chat_api_prefers_active_client_history_over_unscoped_db_history(
+        self,
+        _mock_search_context,
+        mock_post,
+    ):
+        # Mevcut localStorage sohbetlerinde DB'de session_key olmayan eski kayıtlar prompt'a karışmamalıdır.
+        user = get_user_model().objects.create_user(
+            username="client-history-user",
+            password="strong-test-password",
+        )
+        views.ChatMessage.objects.create(
+            user=user,
+            user_query="Bilgisayar mühendisliği hakkında bilgi alabilir miyim?",
+            ai_response="Bilgisayar mühendisliği programı bilgisi.",
+        )
+        self.client.force_login(user)
+        mock_post.return_value = MockOllamaStream(
+            [json.dumps({"message": {"content": "Yeni yanıt"}, "done": True})]
+        )
+
+        response = self.client.post(
+            reverse("chat_api"),
+            data=json.dumps(
+                {
+                    "message": "Peki kontenjanı nedir?",
+                    "conversation_id": "chat_psikoloji",
+                    "history": [
+                        {
+                            "text": "Psikoloji bölümü hakkında bilgi alabilir miyim?",
+                            "sender": "user",
+                        },
+                        {"text": "Psikoloji bölümü bilgisi.", "sender": "bot"},
+                        {"text": "Peki kontenjanı nedir?", "sender": "user"},
+                    ],
+                }
+            ),
+            content_type="application/json",
+        )
+
+        b"".join(response.streaming_content)
+        payload_messages = mock_post.call_args.kwargs["json"]["messages"]
+        contents = [message["content"] for message in payload_messages]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Psikoloji bölümü hakkında bilgi alabilir miyim?", contents)
+        self.assertIn("Psikoloji bölümü bilgisi.", contents)
+        self.assertNotIn("Bilgisayar mühendisliği programı bilgisi.", contents)
 
     @patch("chat.views.requests.post")
     @patch("chat.views.search_context", return_value=([], []))
@@ -548,6 +655,61 @@ class KeywordScoringTests(TestCase):
 
         self.assertIn("Bilgisayar Mühendisliği", context)
         self.assertNotIn("Tekrar eden içerik", context)
+
+    def test_staff_search_prioritizes_matching_department_staff_page(self):
+        # Akademik kadro sorusunda başka fakültelerin kadro sayfaları öne geçmemelidir.
+        correct_entry = UniversityData.objects.create(
+            title="Bilgisayar Mühendisliği - Akademik Kadro",
+            url="https://example.com/bolumler/bilgisayar-muhendisligi/akademik-kadro",
+            content="Akademik Kadro Bilgisayar Mühendisliği",
+            category="program",
+            source="main_site",
+        )
+        UniversityData.objects.create(
+            title="Tıp Fakültesi - Akademik Kadro",
+            url="https://example.com/tip-fakultesi/akademik-kadro",
+            content="Akademik Kadro Prof. Dr. Yanlış Kişi",
+            category="program",
+            source="main_site",
+        )
+
+        results = views.search_keyword("Bilgisayar Mühendisliği akademik kadrosunda kimler var?")
+
+        self.assertEqual(results[0], correct_entry)
+
+    def test_build_context_skips_staff_page_without_staff_names(self):
+        # Doğru akademik kadro sayfası isim içermiyorsa model yanlış isim uydurmamalıdır.
+        entry = UniversityData(
+            id=1,
+            title="Bilgisayar Mühendisliği - Akademik Kadro",
+            url="https://example.com/bolumler/bilgisayar-muhendisligi/akademik-kadro",
+            content="Akademik Kadro Anasayfa Bölüm Başkanının Mesajı Hakkında",
+        )
+
+        context = views.build_context(
+            [entry],
+            [],
+            "Bilgisayar Mühendisliği akademik kadrosunda kimler var?",
+        )
+
+        self.assertEqual(context, "")
+
+    def test_build_context_keeps_staff_page_with_staff_names(self):
+        # İsim/unvan içeren akademik kadro bağlamı korunmalıdır.
+        entry = UniversityData(
+            id=1,
+            title="Bilgisayar Mühendisliği - Akademik Kadro",
+            url="https://example.com/bolumler/bilgisayar-muhendisligi/akademik-kadro",
+            content="Akademik Kadro\nProf. Dr. Ada Lovelace\nDr. Öğr. Üyesi Alan Turing",
+        )
+
+        context = views.build_context(
+            [entry],
+            [],
+            "Bilgisayar Mühendisliği akademik kadrosunda kimler var?",
+        )
+
+        self.assertIn("Prof. Dr. Ada Lovelace", context)
 
     def test_fee_search_prioritizes_tuition_page_over_scholarship_page(self):
         # Ücret sorusunda gerçek ücret sayfası burs sayfasının önüne geçmelidir.
