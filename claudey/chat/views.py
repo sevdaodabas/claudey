@@ -1,5 +1,6 @@
 import json
 import re
+from types import SimpleNamespace
 
 import requests
 from django.contrib.postgres.search import SearchQuery, SearchRank, SearchVector
@@ -20,7 +21,7 @@ from .vector_service import collection, get_embedding
 from scraper.models import UniversityData
 
 OLLAMA_URL = "http://claudey_ai:11434/api/chat"
-MODEL_NAME = "qwen2.5:3b"
+MODEL_NAME = "qwen2.5:7b"
 OLLAMA_KEEP_ALIVE = "30m"
 
 SYSTEM_PROMPT = (
@@ -74,6 +75,15 @@ TITLE_INTENT_FORBIDDEN_TERMS = {
 FEE_HINTS = ("ücret", "ucret", "fiyat", "öğrenim ücreti", "ogrenim ucreti", "ne kadar")
 SCHOLARSHIP_HINTS = ("burs", "indirim", "destek")
 
+STAFF_HINTS = (
+    "akademik kadro", "kadrosunda", "öğretim üyesi", "ogretim uyesi",
+    "öğretim üyeleri", "ogretim uyeleri", "hoca", "hocalar", "kimler",
+)
+STAFF_MARKERS = (
+    "Prof. Dr.", "Doç. Dr.", "Doc. Dr.", "Dr. Öğr. Üyesi", "Dr. Ogr. Uyesi",
+    "Öğr. Gör.", "Ogr. Gor.", "Arş. Gör.", "Ars. Gor.",
+)
+
 
 def get_or_create_session_key(request):
     """Misafir sohbetlerini birbirinden ayırmak için oturum anahtarı sağlar."""
@@ -87,6 +97,68 @@ def get_message_queryset(request):
     if request.user.is_authenticated:
         return ChatMessage.objects.filter(user=request.user)
     return ChatMessage.objects.none()
+
+
+def normalize_conversation_id(value):
+    """Frontend sohbet id'sini DB alanına güvenli şekilde sığdırır."""
+    conversation_id = re.sub(r"[^A-Za-z0-9_-]", "", (value or "").strip())
+    return conversation_id[:40]
+
+
+def get_recent_history(request, conversation_id=None, limit=4):
+    """Son mesajları aktif sohbetle sınırlı döndürür.
+
+    conversation_id gelmezse eski kayıtlarla uyumluluk için kullanıcının genel geçmişine
+    bakılır; frontend artık her istekte aktif sohbet id'sini gönderir.
+    """
+    queryset = get_message_queryset(request)
+    if conversation_id:
+        queryset = queryset.filter(session_key=conversation_id)
+
+    recent_history = list(queryset.order_by("-id")[:limit])
+    recent_history.reverse()
+    return recent_history
+
+
+def normalize_client_history(history, current_user_msg, limit=4):
+    """Frontend'in aktif sohbet geçmişini user/assistant çiftlerine indirger."""
+    if not isinstance(history, list):
+        return []
+
+    messages = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        sender = item.get("sender")
+        text = re.sub(r"\s+", " ", (item.get("text") or "")).strip()
+        if sender not in ("user", "bot") or not text:
+            continue
+        messages.append({"sender": sender, "text": text[:1200]})
+
+    # Frontend mesajı göndermeden hemen önce current user mesajını listeye ekliyor;
+    # prompt geçmişinde aynı kullanıcı mesajı iki kez görünmesin.
+    if (
+        messages
+        and messages[-1]["sender"] == "user"
+        and messages[-1]["text"] == current_user_msg
+    ):
+        messages.pop()
+
+    pairs = []
+    pending_user = None
+    for message in messages:
+        if message["sender"] == "user":
+            pending_user = message["text"]
+        elif message["sender"] == "bot" and pending_user:
+            pairs.append(
+                SimpleNamespace(
+                    user_query=pending_user,
+                    ai_response=message["text"],
+                )
+            )
+            pending_user = None
+
+    return pairs[-limit:]
 
 
 def has_hint(text, intent_name):
@@ -113,6 +185,7 @@ def detect_query_intent(user_msg):
     }
     intent["is_fee"] = any(hint in text for hint in FEE_HINTS)
     intent["is_scholarship"] = any(hint in text for hint in SCHOLARSHIP_HINTS)
+    intent["is_staff"] = intent["is_program"] and any(hint in text for hint in STAFF_HINTS)
     intent["is_contact"] = intent["is_contact"] or intent["is_location"]
     if intent["is_transport"]:
         intent["is_location"] = False
@@ -203,6 +276,11 @@ def score_entry_for_intent(entry, intent):
             score += 0.9
         if any(token in title_lower for token in ("program", "bölüm", "bolum", "fakülte", "fakulte", "müfredat", "mufredat")):
             score += 0.7
+        if intent["is_staff"]:
+            if "akademik-kadro" in url_lower or "akademik kadro" in title_lower:
+                score += 3.0
+            if entry.category == "staff":
+                score += 1.0
 
     if intent["is_life"]:
         if entry.category == "general":
@@ -273,6 +351,17 @@ def get_priority_queryset(intent, keyword_filter):
         )
 
     if intent["is_program"]:
+        if intent["is_staff"]:
+            staff_filter = (
+                Q(category="staff") |
+                Q(title__icontains="akademik kadro") |
+                Q(url__icontains="akademik-kadro")
+            )
+            return (
+                UniversityData.objects
+                .filter(Q(category__in=["program", "course", "staff"]) & staff_filter & keyword_filter)
+                .order_by("-scraped_at")[:120]
+            )
         return (
             UniversityData.objects
             .filter(Q(category__in=["program", "course", "staff"]) & keyword_filter)
@@ -471,6 +560,13 @@ def get_context_extractor(intent):
     return None
 
 
+def has_staff_answer_content(text):
+    """Akademik kadro cevabı için içerikte gerçek kişi/unvan izi var mı?"""
+    if not text:
+        return False
+    return any(marker in text for marker in STAFF_MARKERS)
+
+
 def search_keyword(user_msg):
     """Önce tam metin arama, sonra keyword fallback ile aday kayıtları bulur."""
     keywords = extract_keywords(user_msg)
@@ -573,6 +669,11 @@ def should_use_vector_search(pg_results, intent):
     if intent["is_location"] or intent["is_contact"] or intent["is_transport"]:
         return False
 
+    # Akademik kadro sorularında bölümün kendi sayfası dışında semantik olarak benzer
+    # başka fakültelerin kadro sayfaları kolayca karışıyor.
+    if intent["is_staff"]:
+        return False
+
     if not pg_results:
         return True
 
@@ -616,6 +717,8 @@ def build_context(keyword_entries, vector_chunks, user_msg, context_query=None):
             if context_extractor
             else extract_relevant_paragraphs(entry.content, keywords, max_chars=1200)
         )
+        if intent["is_staff"] and not has_staff_answer_content(relevant_text):
+            continue
         if relevant_text:
             parts.append(f"Kaynak: {entry.title}\nURL: {entry.url}\n{relevant_text}")
             seen_keys.add(str(entry.id))
@@ -639,6 +742,8 @@ def build_context(keyword_entries, vector_chunks, user_msg, context_query=None):
             snippet = context_extractor(chunk.get("content", ""), max_chars=max_chars)
         else:
             snippet = extract_relevant_paragraphs(chunk.get("content", ""), keywords, max_chars=500)
+        if intent["is_staff"] and not has_staff_answer_content(snippet):
+            continue
         if not snippet:
             continue
 
@@ -699,8 +804,10 @@ def chat_api(request):
     if not user_msg:
         return JsonResponse({"reply": "Lütfen bir mesaj yazın."}, status=400)
 
-    recent_history = list(get_message_queryset(request).order_by("-id")[:4])
-    recent_history.reverse()
+    conversation_id = normalize_conversation_id(data.get("conversation_id"))
+    recent_history = normalize_client_history(data.get("history"), user_msg)
+    if not recent_history:
+        recent_history = get_recent_history(request, conversation_id)
 
     is_chat_msg = any(kw in user_msg.lower() for kw in CHAT_KEYWORDS)
 
@@ -712,6 +819,7 @@ def chat_api(request):
             try:
                 ChatMessage.objects.create(
                     user=request.user,
+                    session_key=conversation_id,
                     user_query=user_msg,
                     ai_response=simple_chat_reply,
                 )
@@ -859,6 +967,7 @@ def chat_api(request):
                     try:
                         ChatMessage.objects.create(
                             user=save_user,
+                            session_key=conversation_id,
                             user_query=user_msg,
                             ai_response=ai_reply,
                         )

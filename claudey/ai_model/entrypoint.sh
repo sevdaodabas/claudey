@@ -12,7 +12,7 @@ echo "Ollama sunucusu hazır."
 
 # Qwen2.5 modeli indirilmediyse indir
 echo "Qwen2.5 modeli indiriliyor..."
-ollama pull qwen2.5:3b
+ollama pull qwen2.5:7b
 echo "Model hazır."
 
 # ChromaDB için embedding modelini indir
